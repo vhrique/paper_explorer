@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: paper-explorer-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for hot-reloading
+      - ./backend:/app
+      # Mount persistent storage for database and uploads
+      - ./chroma_db:/app/chroma_db
+      - ./backend/static:/app/static
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - paper-explorer-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: paper-explorer-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount source code for hot-reloading
+      - ./frontend:/app
+      # Use anonymous volume for node_modules to avoid conflicts
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - paper-explorer-network
+
+networks:
+  paper-explorer-network:
+    driver: bridge
