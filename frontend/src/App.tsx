@@ -116,8 +116,8 @@ function App() {
             <div className="bg-white rounded-2xl shadow-lg border border-gray-100 h-full overflow-hidden flex">
               {/* Graph View - Left Side */}
               <div
-                className="border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex flex-col"
-                style={{ width: selectedNode ? '50%' : '100%', transition: 'width 0.3s ease' }}
+                className={`border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex flex-col transition-all duration-300 ${selectedNode ? 'w-1/2' : 'w-full'
+                  }`}
               >
                 <div className="p-4 border-b border-gray-200">
                   <div className="flex items-center justify-between">
@@ -129,7 +129,7 @@ function App() {
                     </div>
                   </div>
                 </div>
-                <div className="flex-1 relative">
+                <div className="flex-1 relative overflow-hidden">
                   <GraphView data={graphData} onNodeClick={handleNodeClick} />
                   {/* Floating Papers Sidebar */}
                   <PapersSidebar
@@ -138,6 +138,7 @@ function App() {
                   />
                 </div>
               </div>
+
 
               {/* PDF Viewer - Right Side */}
               {selectedNode && (
