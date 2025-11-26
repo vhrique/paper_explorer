@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { ProjectList } from './components/ProjectList';
 import { GraphView } from './components/GraphView';
 import { PapersSidebar } from './components/PapersSidebar';
-import { NodeDetailModal } from './components/NodeDetailModal';
+import { PDFViewer } from './components/PDFViewer';
+
 import { api } from './api';
 import type { Project, GraphData, Node } from './api';
 import { ArrowLeft, Network } from 'lucide-react';
@@ -112,35 +113,45 @@ function App() {
 
         {currentView === 'graph' && graphData && selectedProject && (
           <div className="h-[calc(100vh-12rem)] relative">
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 h-full overflow-hidden">
-              <div className="p-4 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-xl font-bold text-gray-800">Knowledge Graph</h2>
-                    <p className="text-sm text-gray-600">
-                      {graphData.nodes.length} nodes · {graphData.edges.length} connections
-                    </p>
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 h-full overflow-hidden flex">
+              {/* Graph View - Left Side */}
+              <div
+                className="border-b border-gray-200 bg-gradient-to-r from-blue-50 to-indigo-50 flex flex-col"
+                style={{ width: selectedNode ? '50%' : '100%', transition: 'width 0.3s ease' }}
+              >
+                <div className="p-4 border-b border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-xl font-bold text-gray-800">Knowledge Graph</h2>
+                      <p className="text-sm text-gray-600">
+                        {graphData.nodes.length} nodes · {graphData.edges.length} connections
+                      </p>
+                    </div>
                   </div>
                 </div>
+                <div className="flex-1 relative">
+                  <GraphView data={graphData} onNodeClick={handleNodeClick} />
+                  {/* Floating Papers Sidebar */}
+                  <PapersSidebar
+                    projectId={selectedProject.id}
+                    onUploadComplete={handleUploadComplete}
+                  />
+                </div>
               </div>
-              <div className="h-[calc(100%-5rem)] relative">
-                <GraphView data={graphData} onNodeClick={handleNodeClick} />
-                {/* Floating Papers Sidebar */}
-                <PapersSidebar
-                  projectId={selectedProject.id}
-                  onUploadComplete={handleUploadComplete}
-                />
-              </div>
+
+              {/* PDF Viewer - Right Side */}
+              {selectedNode && (
+                <div className="flex-1 animate-in slide-in-from-right duration-300">
+                  <PDFViewer
+                    node={selectedNode}
+                    onClose={() => setSelectedNode(null)}
+                  />
+                </div>
+              )}
             </div>
           </div>
         )}
       </main>
-
-      {/* Node Detail Modal */}
-      <NodeDetailModal
-        node={selectedNode}
-        onClose={() => setSelectedNode(null)}
-      />
     </div>
   );
 }
