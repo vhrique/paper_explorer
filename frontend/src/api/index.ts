@@ -78,6 +78,11 @@ export const api = {
         return response.data;
     },
 
+    getPaper: async (paperId: number): Promise<Paper> => {
+        const response = await axios.get(`${API_URL}/papers/${paperId}`);
+        return response.data;
+    },
+
     deletePaper: async (paperId: number): Promise<void> => {
         await axios.delete(`${API_URL}/papers/${paperId}`);
     }

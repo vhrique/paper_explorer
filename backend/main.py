@@ -87,6 +87,20 @@ def list_papers(project_id: int):
     conn.close()
     return [dict(row) for row in rows]
 
+@app.get("/papers/{paper_id}", response_model=Paper)
+def get_paper(paper_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM papers WHERE id = ?", (paper_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    return dict(row)
+
+
 @app.delete("/papers/{paper_id}")
 def delete_paper(paper_id: int):
     # Get paper info first to know which project it belongs to
