@@ -41,10 +41,9 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
         fetchPaper();
     }, [node.paper_id]);
 
-    // Scroll to highlighted page when node changes or pages are loaded
-    useEffect(() => {
-        if (numPages > 0 && highlightedPageRef.current) {
-            // Small delay to ensure the page is rendered and layout is stable
+    // Scroll to highlighted page
+    const scrollToHighlight = () => {
+        if (highlightedPageRef.current) {
             setTimeout(() => {
                 highlightedPageRef.current?.scrollIntoView({
                     behavior: 'smooth',
@@ -52,10 +51,19 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
                 });
             }, 100);
         }
-    }, [numPages, node.id]);
+    };
+
+    // Scroll when node changes (same paper)
+    useEffect(() => {
+        if (numPages > 0) {
+            scrollToHighlight();
+        }
+    }, [node.id, numPages]);
 
     const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
         setNumPages(numPages);
+        // Scroll after document is loaded
+        setTimeout(scrollToHighlight, 100);
     };
 
     const handleZoomIn = () => setScale(prev => Math.min(prev + 0.2, 3.0));
