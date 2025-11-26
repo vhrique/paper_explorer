@@ -1,5 +1,6 @@
 from typing import List, Dict, Any
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import PCA
 import numpy as np
 
 class GraphService:
@@ -13,6 +14,23 @@ class GraphService:
         
         if not embeddings:
              return {"nodes": nodes, "edges": []}
+
+        # Convert to numpy array for PCA
+        embeddings_array = np.array(embeddings)
+        
+        # Use PCA to project embeddings to 2D for positioning
+        # This places semantically similar content close together
+        if len(embeddings) >= 2:
+            n_components = min(2, len(embeddings))
+            pca = PCA(n_components=n_components)
+            positions_2d = pca.fit_transform(embeddings_array)
+            
+            # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
+            positions_2d = positions_2d * 1500  # Scale factor
+            
+            print(f"PCA explained variance: {pca.explained_variance_ratio_}")
+        else:
+            positions_2d = np.array([[0, 0]] * len(embeddings))
 
         # Calculate similarity matrix
         sim_matrix = cosine_similarity(embeddings)
@@ -53,12 +71,26 @@ class GraphService:
                 "weight": float(sim_data['similarity'])
             })
         
-        # Clean up nodes (remove embeddings to save bandwidth)
+        # Clean up nodes and add PCA positions
         graph_nodes = []
-        for node in nodes:
+        for i, node in enumerate(nodes):
             n = node.copy()
+            
+            # Add PCA position if available
+            if i in node_indices:
+                embedding_idx = node_indices.index(i)
+                n["position"] = {
+                    "x": float(positions_2d[embedding_idx][0]),
+                    "y": float(positions_2d[embedding_idx][1]) if positions_2d.shape[1] > 1 else 0
+                }
+            else:
+                # No embedding, place at origin
+                n["position"] = {"x": 0, "y": 0}
+            
+            # Remove embedding to save bandwidth
             if "embedding" in n:
                 del n["embedding"]
             graph_nodes.append(n)
 
+        print(f"Graph built: {len(graph_nodes)} nodes, {len(edges)} edges ({len([e for e in edges if e['type']=='sequence'])} sequential, {len([e for e in edges if e['type']=='similarity'])} similarity)")
         return {"nodes": graph_nodes, "edges": edges}
