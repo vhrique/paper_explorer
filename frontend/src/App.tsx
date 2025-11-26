@@ -2,8 +2,9 @@ import { useState } from 'react';
 import { ProjectList } from './components/ProjectList';
 import { GraphView } from './components/GraphView';
 import { PapersSidebar } from './components/PapersSidebar';
+import { NodeDetailModal } from './components/NodeDetailModal';
 import { api } from './api';
-import type { Project, GraphData } from './api';
+import type { Project, GraphData, Node } from './api';
 import { ArrowLeft, Network } from 'lucide-react';
 
 type View = 'projects' | 'graph';
@@ -12,6 +13,7 @@ function App() {
   const [currentView, setCurrentView] = useState<View>('projects');
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
@@ -57,11 +59,17 @@ function App() {
     setCurrentView('projects');
     setSelectedProject(null);
     setGraphData(null);
+    setSelectedNode(null);
   };
 
   const handleNodeClick = (node: any) => {
     console.log('Node clicked:', node);
-    // Future: show node details in a modal or sidebar
+    // The node object from React Flow puts the original data in node.data.original
+    // But our GraphView passes the API node directly to onNodeClick
+    // Let's check what we get.
+    // In GraphView.tsx: onNodeClick(node.data.original)
+    // So we get the raw API Node object.
+    setSelectedNode(node);
   };
 
   return (
@@ -127,6 +135,12 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Node Detail Modal */}
+      <NodeDetailModal
+        node={selectedNode}
+        onClose={() => setSelectedNode(null)}
+      />
     </div>
   );
 }

@@ -27,6 +27,7 @@ export interface Node {
     bbox: number[];
     paper_id: number;
     paper_color?: string;
+    position?: { x: number; y: number };  // PCA-based position from backend
 }
 
 export interface Edge {
