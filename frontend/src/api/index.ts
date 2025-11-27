@@ -142,8 +142,10 @@ export const api = {
         return response.data;
     },
 
-    computeNewEmbeddings: async (projectId: number): Promise<{ status: string; message: string; nodes_processed: number }> => {
-        const response = await axios.post(`${API_URL}/projects/${projectId}/embeddings/compute`);
+    computeNewEmbeddings: async (projectId: number, useGlobalContext: boolean = false): Promise<{ status: string; message: string; nodes_processed: number }> => {
+        const response = await axios.post(`${API_URL}/projects/${projectId}/embeddings/compute`, null, {
+            params: { use_global_context: useGlobalContext }
+        });
         return response.data;
     }
 };

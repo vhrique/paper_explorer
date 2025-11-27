@@ -38,11 +38,15 @@ class EmbeddingService:
         
         return nodes
 
-    def compute_new_embeddings(self, nodes: List[dict]) -> List[dict]:
+    def compute_new_embeddings(self, nodes: List[dict], external_nodes: List[dict] = None) -> List[dict]:
         """
         Train a probabilistic SVM on nodes that have tags.
         Inputs: original embeddings
         Outputs: probability vector over tags (new_embedding)
+        
+        Args:
+            nodes: Nodes from the current project
+            external_nodes: Optional nodes from other projects (for cross-project learning)
         """
 
         # -----------------------------
@@ -51,7 +55,12 @@ class EmbeddingService:
         X_train = []
         tag_list = []  # list of tag-name lists
 
-        for node in nodes:
+        # Combine current project nodes with external nodes for training
+        all_training_nodes = nodes.copy()
+        if external_nodes:
+            all_training_nodes.extend(external_nodes)
+
+        for node in all_training_nodes:
             emb = node.get("embedding")
             tags = node.get("tags", [])
 
@@ -80,7 +89,7 @@ class EmbeddingService:
         clf.fit(X_train, Y_train)
 
         # -----------------------------
-        # 4. Predict probabilities for ALL nodes
+        # 4. Predict probabilities for CURRENT PROJECT nodes only
         # -----------------------------
         for node in nodes:
             emb = node.get("embedding")
