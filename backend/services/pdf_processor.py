@@ -44,6 +44,7 @@ class PDFProcessor:
             image_list = page.get_images(full=True)
             extracted_xrefs = set()  # Track extracted images to avoid duplicates
             
+            image_list = [] # so to not process images for now (changing encoder)
             for img_index, img in enumerate(image_list):
                 xref = img[0]
                 

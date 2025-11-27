@@ -5,7 +5,8 @@ from typing import List, Union
 import numpy as np
 
 class EmbeddingService:
-    def __init__(self, model_name: str = "sentence-transformers/clip-ViT-B-32"):
+    # def __init__(self, model_name: str = "sentence-transformers/clip-ViT-B-32"):
+    def __init__(self, model_name: str = "intfloat/e5-large-v2"): # Trying different embedding model
         self.model = SentenceTransformer(model_name)
 
     def generate_text_embedding(self, text: str) -> List[float]:
