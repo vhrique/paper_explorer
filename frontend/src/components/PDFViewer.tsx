@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { X, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
-import type { Node, Paper } from '../api';
+import type { Node, Paper, Tag } from '../api';
 import { api } from '../api';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
@@ -12,15 +12,23 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/b
 interface PDFViewerProps {
     node: Node;
     onClose: () => void;
+    projectId: number;
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId }) => {
     const [paper, setPaper] = useState<Paper | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const highlightedPageRef = useRef<HTMLDivElement>(null);
+
+    // Tag management state
+    const [tags, setTags] = useState<Tag[]>([]);
+    const [availableTags, setAvailableTags] = useState<Tag[]>([]);
+    const [showTagInput, setShowTagInput] = useState(false);
+    const [newTagName, setNewTagName] = useState('');
+    const [isGlobalTag, setIsGlobalTag] = useState(false);
 
     // Fetch paper data when paper_id changes
     useEffect(() => {
@@ -40,6 +48,30 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
 
         fetchPaper();
     }, [node.paper_id]);
+
+    // Load tags for the current node
+    useEffect(() => {
+        const loadTags = async () => {
+            try {
+                const nodeTags = await api.getNodeTags(node.id);
+                setTags(nodeTags);
+            } catch (error) {
+                console.error('Failed to load node tags:', error);
+            }
+        };
+
+        const loadAvailableTags = async () => {
+            try {
+                const allTags = await api.listTags(projectId);
+                setAvailableTags(allTags);
+            } catch (error) {
+                console.error('Failed to load available tags:', error);
+            }
+        };
+
+        loadTags();
+        loadAvailableTags();
+    }, [node.id, projectId]);
 
     // Scroll to highlighted page
     const scrollToHighlight = () => {
@@ -140,6 +172,108 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
                         <X size={20} className="text-gray-600" />
                     </button>
                 </div>
+            </div>
+
+            {/* Tags Section */}
+            <div className="p-4 border-b border-gray-200 bg-white">
+                <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-bold text-gray-500 uppercase">Tags</h4>
+                    {!showTagInput && (
+                        <button
+                            onClick={() => setShowTagInput(true)}
+                            className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                        >
+                            + Add Tag
+                        </button>
+                    )}
+                </div>
+
+                <div className="flex flex-wrap gap-2 mb-2">
+                    {tags.map(tag => (
+                        <span
+                            key={tag.id}
+                            className={`px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${tag.type === 'global' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+                                }`}
+                        >
+                            {tag.name}
+                            <button
+                                onClick={async () => {
+                                    await api.removeNodeTag(node.id, tag.id);
+                                    const updatedTags = await api.getNodeTags(node.id);
+                                    setTags(updatedTags);
+                                }}
+                                className="hover:text-red-600"
+                            >
+                                <X size={12} />
+                            </button>
+                        </span>
+                    ))}
+                </div>
+
+                {showTagInput && (
+                    <div className="bg-gray-50 p-3 rounded-lg">
+                        <input
+                            type="text"
+                            value={newTagName}
+                            onChange={(e) => setNewTagName(e.target.value)}
+                            placeholder="Tag name..."
+                            className="w-full text-sm border border-gray-300 rounded-md px-2 py-1 mb-2"
+                        />
+                        <div className="flex items-center gap-2 mb-2">
+                            <input
+                                type="checkbox"
+                                id="isGlobal"
+                                checked={isGlobalTag}
+                                onChange={(e) => setIsGlobalTag(e.target.checked)}
+                            />
+                            <label htmlFor="isGlobal" className="text-xs text-gray-600">Global Tag</label>
+                        </div>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={async () => {
+                                    if (!newTagName.trim()) return;
+                                    try {
+                                        // Check if tag exists
+                                        let tag = availableTags.find(
+                                            t => t.name === newTagName && t.type === (isGlobalTag ? 'global' : 'local')
+                                        );
+
+                                        // Create tag if it doesn't exist
+                                        if (!tag) {
+                                            tag = await api.createTag(
+                                                newTagName,
+                                                isGlobalTag ? 'global' : 'local',
+                                                isGlobalTag ? undefined : projectId
+                                            );
+                                            setAvailableTags([...availableTags, tag]);
+                                        }
+
+                                        // Add tag to node
+                                        await api.addNodeTag(node.id, tag.id);
+                                        const updatedTags = await api.getNodeTags(node.id);
+                                        setTags(updatedTags);
+                                        setNewTagName('');
+                                        setShowTagInput(false);
+                                    } catch (error) {
+                                        console.error('Failed to add tag:', error);
+                                    }
+                                }}
+                                className="px-3 py-1 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700"
+                            >
+                                Add
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setShowTagInput(false);
+                                    setNewTagName('');
+                                }}
+                                className="px-3 py-1 text-gray-600 text-xs hover:bg-gray-200 rounded-md"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* PDF Content - Scrollable */}

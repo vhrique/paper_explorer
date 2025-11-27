@@ -50,3 +50,26 @@ class Node(BaseModel):
 class GraphData(BaseModel):
     nodes: List[Dict[str, Any]]
     edges: List[Dict[str, Any]]
+
+class TagBase(BaseModel):
+    name: str
+    type: str # 'global' or 'local'
+    project_id: Optional[int] = None
+
+class TagCreate(TagBase):
+    pass
+
+class Tag(TagBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class NodeTag(BaseModel):
+    tag_id: int
+    node_id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

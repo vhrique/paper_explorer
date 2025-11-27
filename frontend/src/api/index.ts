@@ -43,6 +43,14 @@ export interface GraphData {
     edges: Edge[];
 }
 
+export interface Tag {
+    id: number;
+    name: string;
+    type: 'global' | 'local';
+    project_id?: number;
+    created_at: string;
+}
+
 export const api = {
     createProject: async (name: string, description: string): Promise<Project> => {
         const response = await axios.post(`${API_URL}/projects/`, { name, description });
@@ -90,6 +98,32 @@ export const api = {
 
     updatePaper: async (paperId: number, updates: { title?: string; color?: string; description?: string }): Promise<Paper> => {
         const response = await axios.patch(`${API_URL}/papers/${paperId}`, updates);
+        return response.data;
+    },
+
+    // Tag API
+    createTag: async (name: string, type: 'global' | 'local', projectId?: number): Promise<Tag> => {
+        const response = await axios.post(`${API_URL}/tags/`, { name, type, project_id: projectId });
+        return response.data;
+    },
+
+    listTags: async (projectId: number): Promise<Tag[]> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/tags`);
+        return response.data;
+    },
+
+    addNodeTag: async (nodeId: string, tagId: number): Promise<void> => {
+        const formData = new FormData();
+        formData.append('tag_id', tagId.toString());
+        await axios.post(`${API_URL}/nodes/${nodeId}/tags`, formData);
+    },
+
+    removeNodeTag: async (nodeId: string, tagId: number): Promise<void> => {
+        await axios.delete(`${API_URL}/nodes/${nodeId}/tags/${tagId}`);
+    },
+
+    getNodeTags: async (nodeId: string): Promise<Tag[]> => {
+        const response = await axios.get(`${API_URL}/nodes/${nodeId}/tags`);
         return response.data;
     }
 };
