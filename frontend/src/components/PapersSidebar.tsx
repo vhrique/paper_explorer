@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import type { Paper } from '../api';
 import { PDFUploader } from './PDFUploader';
-import { FileText, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { EditPaperModal } from './EditPaperModal';
+import { FileText, ChevronLeft, ChevronRight, Trash2, Edit2 } from 'lucide-react';
 
 interface PapersSidebarProps {
     projectId: number;
@@ -13,6 +14,7 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({ projectId, onUploa
     const [papers, setPapers] = useState<Paper[]>([]);
     const [isExpanded, setIsExpanded] = useState(true);
     const [isLoading, setIsLoading] = useState(true);
+    const [editingPaper, setEditingPaper] = useState<Paper | null>(null);
 
     const loadPapers = async () => {
         try {
@@ -107,6 +109,16 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({ projectId, onUploa
                                 >
                                     <Trash2 size={16} />
                                 </button>
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingPaper(paper);
+                                    }}
+                                    className="absolute top-2 right-9 p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                    title="Edit paper"
+                                >
+                                    <Edit2 size={16} />
+                                </button>
 
                                 <div className="flex items-start gap-3">
                                     <div className="p-2 rounded-lg" style={{ backgroundColor: `${paper.color}20` }}>
@@ -126,6 +138,18 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({ projectId, onUploa
                     </div>
                 )}
             </div>
-        </div>
+
+
+            {
+                editingPaper && (
+                    <EditPaperModal
+                        paper={editingPaper}
+                        isOpen={true}
+                        onClose={() => setEditingPaper(null)}
+                        onUpdate={handleUploadComplete}
+                    />
+                )
+            }
+        </div >
     );
 };
