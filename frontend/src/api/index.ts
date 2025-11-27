@@ -16,6 +16,7 @@ export interface Paper {
     title: string;
     filename: string;
     color: string;
+    description?: string;
     created_at: string;
 }
 
@@ -85,5 +86,10 @@ export const api = {
 
     deletePaper: async (paperId: number): Promise<void> => {
         await axios.delete(`${API_URL}/papers/${paperId}`);
+    },
+
+    updatePaper: async (paperId: number, updates: { title?: string; color?: string; description?: string }): Promise<Paper> => {
+        const response = await axios.patch(`${API_URL}/papers/${paperId}`, updates);
+        return response.data;
     }
 };

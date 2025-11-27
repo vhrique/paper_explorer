@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -141,7 +141,74 @@ def get_paper_pdf(paper_id: int):
     except Exception as e:
         print(f"Error fetching PDF: {e}")
         raise HTTPException(status_code=404, detail="PDF file not found")
-
+@app.patch("/papers/{paper_id}", response_model=Paper)
+def update_paper(paper_id: int, paper_update: PaperUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Check if paper exists
+    cursor.execute("SELECT * FROM papers WHERE id = %s", (paper_id,))
+    existing_paper = cursor.fetchone()
+    
+    if not existing_paper:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    # Build update query dynamically
+    update_fields = []
+    params = []
+    
+    if paper_update.title is not None:
+        update_fields.append("title = %s")
+        params.append(paper_update.title)
+        
+    if paper_update.color is not None:
+        update_fields.append("color = %s")
+        params.append(paper_update.color)
+        
+    if paper_update.description is not None:
+        update_fields.append("description = %s")
+        params.append(paper_update.description)
+        
+    if not update_fields:
+        conn.close()
+        return dict(existing_paper)
+        
+    params.append(paper_id)
+    query = f"UPDATE papers SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
+    
+    cursor.execute(query, tuple(params))
+    updated_paper = cursor.fetchone()
+    conn.commit()
+    
+    # If color changed, update ChromaDB metadata
+    if paper_update.color is not None:
+        try:
+            collection = get_chroma_collection(existing_paper['project_id'])
+            results = collection.get(where={"paper_id": paper_id})
+            
+            if not results["ids"]:
+                results = collection.get(where={"paper_id": str(paper_id)})
+                
+            if results["ids"]:
+                # Update metadata for all nodes
+                new_metadatas = []
+                for metadata in results["metadatas"]:
+                    metadata["paper_color"] = paper_update.color
+                    new_metadatas.append(metadata)
+                    
+                collection.update(
+                    ids=results["ids"],
+                    metadatas=new_metadatas
+                )
+        except Exception as e:
+            print(f"Error updating ChromaDB metadata: {e}")
+            
+    conn.close()
+    
+    paper = dict(updated_paper)
+    paper['url'] = f"/api/papers/{paper_id}/pdf"
+    return paper
 
 
 @app.delete("/papers/{paper_id}")

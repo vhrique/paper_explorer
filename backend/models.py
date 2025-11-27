@@ -27,10 +27,16 @@ class Paper(BaseModel):
     filename: str
     url: Optional[str] = None
     color: str = "#3B82F6"  # Default blue color
+    description: Optional[str] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+class PaperUpdate(BaseModel):
+    title: Optional[str] = None
+    color: Optional[str] = None
+    description: Optional[str] = None
 
 class Node(BaseModel):
     id: str

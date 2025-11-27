@@ -35,10 +35,19 @@ def init_db():
                 title TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 color TEXT DEFAULT '#3B82F6',
+                description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
             )
             ''')
+            
+            # Add description column if it doesn't exist (migration)
+            try:
+                cursor.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS description TEXT")
+                conn.commit()
+            except Exception as e:
+                print(f"Migration failed (description column): {e}")
+                conn.rollback()
             
             conn.commit()
             conn.close()
