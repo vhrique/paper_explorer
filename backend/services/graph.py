@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import PCA
+# from sklearn.decomposition import PCA
+from openTSNE import TSNE
 import numpy as np
 
 class GraphService:
@@ -22,13 +23,16 @@ class GraphService:
         # This places semantically similar content close together
         if len(embeddings) >= 2:
             n_components = min(2, len(embeddings))
-            pca = PCA(n_components=n_components)
-            positions_2d = pca.fit_transform(embeddings_array)
+            # pca = PCA(n_components=n_components)
+            # positions_2d = pca.fit_transform(embeddings_array)
+            tsne = TSNE(n_components=n_components).fit(embeddings_array)
+            positions_2d = tsne.transform(embeddings_array)
             
             # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
-            positions_2d = positions_2d * 1500  # Scale factor
+            # positions_2d = positions_2d * 1500  # Scale factor (PCA)
+            positions_2d = positions_2d * 200  # Scale factor (TSNE)
             
-            print(f"PCA explained variance: {pca.explained_variance_ratio_}")
+            # print(f"PCA explained variance: {pca.explained_variance_ratio_}")
         else:
             positions_2d = np.array([[0, 0]] * len(embeddings))
 
