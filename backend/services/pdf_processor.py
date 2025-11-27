@@ -1,15 +1,22 @@
 import fitz  # PyMuPDF
 import os
 import uuid
+import io
 from typing import List, Dict, Any
+from .storage import S3StorageService
 
 class PDFProcessor:
-    def __init__(self, upload_dir: str = "static/images"):
-        self.upload_dir = upload_dir
-        os.makedirs(self.upload_dir, exist_ok=True)
+    def __init__(self, storage_service: S3StorageService):
+        self.storage_service = storage_service
 
     def process_pdf(self, pdf_path: str, paper_id: int) -> List[Dict[str, Any]]:
-        doc = fitz.open(pdf_path)
+        # If pdf_path is a local path (temp file), open it
+        # If it's a bytes object, open it directly
+        if isinstance(pdf_path, str):
+            doc = fitz.open(pdf_path)
+        else:
+            # Assume it's a file-like object or bytes
+            doc = fitz.open(stream=pdf_path, filetype="pdf")
         nodes = []
 
         for page_num, page in enumerate(doc):
@@ -52,16 +59,14 @@ class PDFProcessor:
                     image_height = base_image.get("height", 0)
                     
                     # Skip very small images (likely artifacts, icons, or decorations)
-                    # Lowered threshold to capture more legitimate small images
                     if image_width < 20 or image_height < 20:
-                        print(f"Skipping tiny image on page {page_num+1}: {image_width}x{image_height}")
                         continue
                     
-                    image_filename = f"{paper_id}_p{page_num+1}_{img_index}.{image_ext}"
-                    image_path = os.path.join(self.upload_dir, image_filename)
+                    image_filename = f"images/{paper_id}_p{page_num+1}_{img_index}.{image_ext}"
                     
-                    with open(image_path, "wb") as f:
-                        f.write(image_bytes)
+                    # Upload to S3
+                    file_obj = io.BytesIO(image_bytes)
+                    self.storage_service.upload_file(file_obj, image_filename, content_type=f"image/{image_ext}")
                     
                     extracted_xrefs.add(xref)
                     
@@ -74,7 +79,7 @@ class PDFProcessor:
                     nodes.append({
                         "id": str(uuid.uuid4()),
                         "type": "image",
-                        "content": image_filename,
+                        "content": image_filename, # Store the S3 key
                         "page_number": page_num + 1,
                         "bbox": bbox,
                         "paper_id": paper_id

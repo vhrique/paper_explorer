@@ -96,7 +96,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose }) => {
         );
     }
 
-    const pdfUrl = `/api/static/pdfs/${paper.project_id}/${paper.filename}`;
+    const pdfUrl = paper.url;
     const borderColor = node.paper_color || '#3B82F6';
 
     // Convert bbox from [x0, y0, x1, y1] to position and size

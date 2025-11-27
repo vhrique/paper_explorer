@@ -35,7 +35,7 @@ const ImageNode = ({ data }: any) => {
         <div className="shadow-md rounded-md bg-white p-1" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
             <img
-                src={`/api/static/images/${data.content}`}
+                src={data.content}
                 alt="Extracted"
                 className="w-32 h-auto rounded-sm"
             />

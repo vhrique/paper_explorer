@@ -25,6 +25,7 @@ class Paper(BaseModel):
     project_id: int
     title: str
     filename: str
+    url: Optional[str] = None
     color: str = "#3B82F6"  # Default blue color
     created_at: datetime
 
