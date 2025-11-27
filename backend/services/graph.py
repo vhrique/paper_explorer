@@ -1,5 +1,6 @@
 from typing import List, Dict, Any
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import MinMaxScaler
 # from sklearn.decomposition import KernelPCA
 from openTSNE import TSNE
 import numpy as np
@@ -29,9 +30,8 @@ class GraphService:
             positions_2d = tsne.transform(embeddings_array)
             
             # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
-            # positions_2d = positions_2d * 1500  # Scale factor (PCA)
-            # positions_2d = positions_2d * 15_000  # Scale factor (KernelPCA)
-            positions_2d = positions_2d * 200  # Scale factor (TSNE)
+            scaler = MinMaxScaler(feature_range=(-2000, 2000))
+            positions_2d = scaler.fit_transform(positions_2d)
             
             # print(f"PCA explained variance: {pca.explained_variance_ratio_}")
         else:
