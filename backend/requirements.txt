@@ -6,3 +6,5 @@ chromadb
 scikit-learn
 python-multipart
 numpy
+boto3
+psycopg2-binary

@@ -5,6 +5,8 @@ import shutil
 import os
 import uuid
 import random
+import io
+import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
@@ -12,6 +14,7 @@ from models import ProjectCreate, Project, Paper, GraphData
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
+from services.storage import S3StorageService
 
 app = FastAPI(title="Paper Explorer API")
 
@@ -23,11 +26,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files for images
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # Initialize Services
-pdf_processor = PDFProcessor()
+storage_service = S3StorageService()
+pdf_processor = PDFProcessor(storage_service)
 embedding_service = EmbeddingService()
 graph_service = GraphService()
 
@@ -38,16 +39,16 @@ def startup_event():
 @app.post("/projects/", response_model=Project)
 def create_project(project: ProjectCreate):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute(
-        "INSERT INTO projects (name, description) VALUES (?, ?)",
+        "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING id",
         (project.name, project.description)
     )
-    project_id = cursor.lastrowid
+    project_id = cursor.fetchone()['id']
     conn.commit()
     
     # Fetch created project
-    cursor.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+    cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
     row = cursor.fetchone()
     conn.close()
     
@@ -56,7 +57,7 @@ def create_project(project: ProjectCreate):
 @app.get("/projects/", response_model=List[Project])
 def list_projects():
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
     rows = cursor.fetchall()
     conn.close()
@@ -67,11 +68,8 @@ def delete_project(project_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Delete the project
-    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    
-    # Also delete associated papers
-    cursor.execute("DELETE FROM papers WHERE project_id = ?", (project_id,))
+    # Delete the project (cascade will handle papers)
+    cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
     
     conn.commit()
     conn.close()
@@ -81,62 +79,114 @@ def delete_project(project_id: int):
 @app.get("/projects/{project_id}/papers/", response_model=List[Paper])
 def list_papers(project_id: int):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM papers WHERE project_id = ? ORDER BY created_at DESC", (project_id,))
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT * FROM papers WHERE project_id = %s ORDER BY created_at DESC", (project_id,))
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    
+    papers = []
+    for row in rows:
+        paper = dict(row)
+        # Generate proxy URL instead of presigned URL
+        paper['url'] = f"/api/papers/{paper['id']}/pdf"
+        papers.append(paper)
+        
+    return papers
 
 @app.get("/papers/{paper_id}", response_model=Paper)
 def get_paper(paper_id: int):
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM papers WHERE id = ?", (paper_id,))
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT * FROM papers WHERE id = %s", (paper_id,))
     row = cursor.fetchone()
     conn.close()
     
     if not row:
         raise HTTPException(status_code=404, detail="Paper not found")
     
-    return dict(row)
+    paper = dict(row)
+    # Generate proxy URL instead of presigned URL
+    paper['url'] = f"/api/papers/{paper_id}/pdf"
+    
+    return paper
+
+@app.get("/papers/{paper_id}/pdf")
+def get_paper_pdf(paper_id: int):
+    """Proxy PDF file from MinIO to avoid CORS issues"""
+    from fastapi.responses import StreamingResponse
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT project_id, filename FROM papers WHERE id = %s", (paper_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    pdf_key = f"pdfs/{row['project_id']}/{row['filename']}"
+    
+    try:
+        # Download from MinIO
+        response = storage_service.s3_client.get_object(Bucket=storage_service.bucket_name, Key=pdf_key)
+        
+        # Stream it to the client
+        return StreamingResponse(
+            response['Body'],
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename={row['filename']}"
+            }
+        )
+    except Exception as e:
+        print(f"Error fetching PDF: {e}")
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
 
 
 @app.delete("/papers/{paper_id}")
 def delete_paper(paper_id: int):
     # Get paper info first to know which project it belongs to
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT project_id FROM papers WHERE id = ?", (paper_id,))
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT project_id, filename FROM papers WHERE id = %s", (paper_id,))
     row = cursor.fetchone()
     
     if not row:
         raise HTTPException(status_code=404, detail="Paper not found")
     
     project_id = row["project_id"]
+    filename = row["filename"]
     
     # Delete the paper from database
-    cursor.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+    cursor.execute("DELETE FROM papers WHERE id = %s", (paper_id,))
     conn.commit()
     conn.close()
+    
+    # Delete PDF from S3
+    pdf_key = f"pdfs/{project_id}/{filename}"
+    storage_service.delete_file(pdf_key)
     
     # Remove all nodes belonging to this paper from ChromaDB
     try:
         collection = get_chroma_collection(project_id)
         
-        # Debug: Check what's in the collection
-        all_results = collection.get()
-        print(f"Total items in collection: {len(all_results['ids']) if all_results['ids'] else 0}")
-        
-        # Get all IDs for this paper - try with integer first
+        # Get all IDs for this paper
         results = collection.get(where={"paper_id": paper_id})
-        print(f"Found {len(results['ids']) if results['ids'] else 0} nodes with paper_id={paper_id} (int)")
         
-        # If nothing found, try string
+        # Also try string if int failed (legacy support)
         if not results["ids"]:
             results = collection.get(where={"paper_id": str(paper_id)})
-            print(f"Found {len(results['ids']) if results['ids'] else 0} nodes with paper_id={str(paper_id)} (str)")
         
         if results["ids"]:
+            # Delete images from S3 if any
+            if results["metadatas"]:
+                for metadata in results["metadatas"]:
+                    if metadata.get("type") == "image":
+                        image_key = metadata.get("content")
+                        if image_key:
+                            storage_service.delete_file(image_key)
+
             collection.delete(ids=results["ids"])
             print(f"Successfully deleted {len(results['ids'])} nodes from ChromaDB for paper {paper_id}")
         else:
@@ -150,13 +200,13 @@ def delete_paper(paper_id: int):
 
 @app.post("/projects/{project_id}/upload/")
 def upload_pdf(project_id: int, file: UploadFile = File(...)):
-    # Save PDF
-    upload_dir = f"static/pdfs/{project_id}"
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
+    # Read file content first
+    file_bytes = file.file.read()
     
-    with open(file_path, "wb") as buffer:
-        buffer.write(file.file.read())
+    # Upload PDF to S3
+    pdf_key = f"pdfs/{project_id}/{file.filename}"
+    # Create a new BytesIO object for upload since upload_fileobj might close it
+    storage_service.upload_file(io.BytesIO(file_bytes), pdf_key, content_type="application/pdf")
     
     # Generate a random color for this paper
     def generate_color():
@@ -172,24 +222,30 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO papers (project_id, title, filename, color) VALUES (?, ?, ?, ?)",
+        "INSERT INTO papers (project_id, title, filename, color) VALUES (%s, %s, %s, %s) RETURNING id",
         (project_id, file.filename, file.filename, paper_color)
     )
-    paper_id = cursor.lastrowid
+    paper_id = cursor.fetchone()[0]
     conn.commit()
     conn.close()
     
-    # Process PDF
-    nodes = pdf_processor.process_pdf(file_path, paper_id)
+    # Process PDF (pass bytes directly)
+    nodes = pdf_processor.process_pdf(io.BytesIO(file_bytes), paper_id)
     
     # Generate Embeddings
     nodes = embedding_service.generate_embeddings(nodes)
     
+    # Filter out nodes with empty embeddings
+    valid_nodes = [node for node in nodes if node.get("embedding") is not None and len(node.get("embedding", [])) > 0]
+    
+    if len(valid_nodes) == 0:
+        return {"message": "File uploaded but no valid embeddings generated", "paper_id": paper_id, "nodes_count": 0}
+    
     # Save to ChromaDB with color in metadata
     collection = get_chroma_collection(project_id)
     
-    ids = [node["id"] for node in nodes]
-    embeddings = [node["embedding"] for node in nodes]
+    ids = [node["id"] for node in valid_nodes]
+    embeddings = [node["embedding"] for node in valid_nodes]
     metadatas = [{
         "type": node["type"],
         "content": node["content"],
@@ -197,8 +253,8 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
         "paper_id": node["paper_id"],
         "paper_color": paper_color,  # Add color to metadata
         "bbox": str(node["bbox"]) # Chroma metadata must be str, int, float, bool
-    } for node in nodes]
-    documents = [node["content"] if node["type"] == "text" else "image" for node in nodes]
+    } for node in valid_nodes]
+    documents = [node["content"] if node["type"] == "text" else "image" for node in valid_nodes]
     
     collection.add(
         ids=ids,
@@ -207,7 +263,7 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
         documents=documents
     )
     
-    return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": len(nodes)}
+    return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": len(valid_nodes)}
 
 @app.get("/projects/{project_id}/graph", response_model=GraphData)
 def get_project_graph(project_id: int):
@@ -220,12 +276,16 @@ def get_project_graph(project_id: int):
     if result["ids"]:
         for i, id in enumerate(result["ids"]):
             metadata = result["metadatas"][i]
-            # Convert bbox back to list if needed, or keep as string for frontend to parse
-            # For graph service, we need embeddings
+            
+            # If it's an image, generate a presigned URL
+            content = metadata["content"]
+            if metadata["type"] == "image":
+                content = storage_service.get_presigned_url(content)
+            
             nodes.append({
                 "id": id,
                 "type": metadata["type"],
-                "content": metadata["content"],
+                "content": content,
                 "page_number": metadata["page_number"],
                 "paper_id": metadata["paper_id"],
                 "paper_color": metadata.get("paper_color", "#3B82F6"),  # Default color if not found
