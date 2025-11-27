@@ -19,6 +19,7 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
     const [isLoading, setIsLoading] = useState(true);
     const [isComputing, setIsComputing] = useState(false);
     const [computeMessage, setComputeMessage] = useState<string | null>(null);
+    const [useGlobalContext, setUseGlobalContext] = useState(false);
 
     const loadTagSummary = async () => {
         try {
@@ -40,7 +41,7 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
         try {
             setIsComputing(true);
             setComputeMessage(null);
-            const result = await api.computeNewEmbeddings(projectId);
+            const result = await api.computeNewEmbeddings(projectId, useGlobalContext);
             setComputeMessage(`✓ ${result.message}`);
             setTimeout(() => setComputeMessage(null), 5000);
         } catch (error) {
@@ -103,8 +104,8 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                                 >
                                     <div className="flex items-center gap-2">
                                         <span className={`px-2 py-0.5 text-xs rounded-full ${tag.tag_type === 'global'
-                                                ? 'bg-blue-100 text-blue-700'
-                                                : 'bg-green-100 text-green-700'
+                                            ? 'bg-blue-100 text-blue-700'
+                                            : 'bg-green-100 text-green-700'
                                             }`}>
                                             {tag.tag_type}
                                         </span>
@@ -139,6 +140,27 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                         </button>
                     </div>
 
+                    {/* Global Context Toggle */}
+                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200">
+                        <div className="flex flex-col">
+                            <label htmlFor="global-context-toggle" className="text-sm font-medium text-gray-700 cursor-pointer">
+                                Use Global Tags Info
+                            </label>
+                            <span className="text-xs text-gray-500 mt-0.5">Use globally-tagged nodes from other projects</span>
+                        </div>
+                        <button
+                            id="global-context-toggle"
+                            onClick={() => setUseGlobalContext(!useGlobalContext)}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useGlobalContext ? 'bg-purple-600' : 'bg-gray-300'
+                                }`}
+                        >
+                            <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${useGlobalContext ? 'translate-x-6' : 'translate-x-1'
+                                    }`}
+                            />
+                        </button>
+                    </div>
+
                     {/* Compute Button */}
                     <button
                         onClick={handleComputeEmbeddings}
@@ -152,8 +174,8 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                     {/* Message */}
                     {computeMessage && (
                         <div className={`mt-3 p-2 rounded-lg text-sm ${computeMessage.startsWith('✓')
-                                ? 'bg-green-100 text-green-700'
-                                : 'bg-red-100 text-red-700'
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-red-100 text-red-700'
                             }`}>
                             {computeMessage}
                         </div>

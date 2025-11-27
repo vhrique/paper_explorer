@@ -481,8 +481,78 @@ def get_tag_summary(project_id: int):
     conn.close()
     return [dict(row) for row in rows]
 
+def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[dict]:
+    """
+    Fetch all nodes from all projects (except the specified one) that have at least one global tag.
+    Returns a list of node dictionaries with embeddings and tags.
+    """
+    from database import chroma_client
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get all project IDs except the current one
+    cursor.execute("SELECT id FROM projects WHERE id != %s", (exclude_project_id,))
+    project_rows = cursor.fetchall()
+    project_ids = [row["id"] for row in project_rows]
+    
+    all_external_nodes = []
+    
+    for project_id in project_ids:
+        try:
+            # Get the ChromaDB collection for this project
+            collection = chroma_client.get_collection(name=f"project_{project_id}")
+            
+            # Fetch all nodes from this project
+            result = collection.get(include=["embeddings", "metadatas"])
+            
+            if not result["ids"]:
+                continue
+            
+            # Get all node IDs for this project
+            node_ids = result["ids"]
+            
+            # Fetch tags for these nodes - only keep nodes with global tags
+            cursor.execute("""
+                SELECT nt.node_id, t.id as tag_id, t.name as tag_name, t.type as tag_type
+                FROM node_tags nt
+                JOIN tags t ON nt.tag_id = t.id
+                WHERE nt.node_id = ANY(%s) AND t.type = 'global'
+                ORDER BY nt.node_id, t.name
+            """, (node_ids,))
+            
+            tag_rows = cursor.fetchall()
+            
+            # Build a map of node_id -> list of global tags
+            node_tags_map = {}
+            for row in tag_rows:
+                node_id = row["node_id"]
+                if node_id not in node_tags_map:
+                    node_tags_map[node_id] = []
+                node_tags_map[node_id].append({
+                    "tag_id": row["tag_id"],
+                    "tag_name": row["tag_name"],
+                    "tag_type": row["tag_type"]
+                })
+            
+            # Build node list - only include nodes that have global tags
+            for i, node_id in enumerate(result["ids"]):
+                if node_id in node_tags_map:  # Only include if has global tags
+                    all_external_nodes.append({
+                        "id": node_id,
+                        "embedding": result["embeddings"][i],
+                        "tags": node_tags_map[node_id]
+                    })
+                    
+        except Exception as e:
+            print(f"Error fetching nodes from project {project_id}: {e}")
+            continue
+    
+    conn.close()
+    return all_external_nodes
+
 @app.post("/projects/{project_id}/embeddings/compute", response_model=ComputeEmbeddingsResponse)
-def compute_new_embeddings(project_id: int):
+def compute_new_embeddings(project_id: int, use_global_context: bool = False):
     """Compute new embeddings for all nodes in a project"""
     import json
     
@@ -537,8 +607,14 @@ def compute_new_embeddings(project_id: int):
             "tags": node_tags_map.get(id, [])  # Include tags, empty list if no tags
         })
     
+    # Fetch external nodes if use_global_context is enabled
+    external_nodes = None
+    if use_global_context:
+        external_nodes = get_global_tagged_nodes_from_all_projects(project_id)
+        print(f"Fetched {len(external_nodes)} external nodes with global tags from other projects")
+    
     # Compute new embeddings
-    nodes_with_new = embedding_service.compute_new_embeddings(nodes)
+    nodes_with_new = embedding_service.compute_new_embeddings(nodes, external_nodes=external_nodes)
     
     # Update ChromaDB metadata with new embeddings
     updated_metadatas = []
