@@ -146,6 +146,7 @@ function App() {
                   <PDFViewer
                     node={selectedNode}
                     onClose={() => setSelectedNode(null)}
+                    projectId={selectedProject.id}
                   />
                 </div>
               )}

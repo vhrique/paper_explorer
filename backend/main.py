@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -366,3 +366,85 @@ def get_project_graph(project_id: int):
 @app.get("/")
 def read_root():
     return {"message": "Paper Explorer API is running"}
+
+@app.post("/tags/", response_model=Tag)
+def create_tag(tag: TagCreate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    try:
+        cursor.execute(
+            "INSERT INTO tags (name, type, project_id) VALUES (%s, %s, %s) RETURNING *",
+            (tag.name, tag.type, tag.project_id)
+        )
+        new_tag = cursor.fetchone()
+        conn.commit()
+        return dict(new_tag)
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Tag already exists")
+    finally:
+        conn.close()
+
+@app.get("/projects/{project_id}/tags", response_model=List[Tag])
+def list_tags(project_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Fetch global tags AND local tags for this project
+    cursor.execute(
+        "SELECT * FROM tags WHERE type = 'global' OR (type = 'local' AND project_id = %s) ORDER BY name",
+        (project_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/nodes/{node_id}/tags")
+def add_node_tag(node_id: str, tag_id: int = Form(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "INSERT INTO node_tags (tag_id, node_id) VALUES (%s, %s)",
+            (tag_id, node_id)
+        )
+        conn.commit()
+        return {"message": "Tag added to node"}
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Tag already assigned to this node")
+    finally:
+        conn.close()
+
+@app.delete("/nodes/{node_id}/tags/{tag_id}")
+def remove_node_tag(node_id: str, tag_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "DELETE FROM node_tags WHERE node_id = %s AND tag_id = %s",
+        (node_id, tag_id)
+    )
+    conn.commit()
+    conn.close()
+    
+    return {"message": "Tag removed from node"}
+
+@app.get("/nodes/{node_id}/tags", response_model=List[Tag])
+def get_node_tags(node_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    cursor.execute("""
+        SELECT t.* 
+        FROM tags t
+        JOIN node_tags nt ON t.id = nt.tag_id
+        WHERE nt.node_id = %s
+        ORDER BY t.name
+    """, (node_id,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
