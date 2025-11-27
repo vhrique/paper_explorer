@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -333,7 +333,7 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": len(valid_nodes)}
 
 @app.get("/projects/{project_id}/graph", response_model=GraphData)
-def get_project_graph(project_id: int):
+def get_project_graph(project_id: int, use_new_embeddings: bool = False):
     collection = get_chroma_collection(project_id)
     
     # Fetch all nodes
@@ -349,7 +349,7 @@ def get_project_graph(project_id: int):
             if metadata["type"] == "image":
                 content = storage_service.get_presigned_url(content)
             
-            nodes.append({
+            node = {
                 "id": id,
                 "type": metadata["type"],
                 "content": content,
@@ -358,7 +358,15 @@ def get_project_graph(project_id: int):
                 "paper_color": metadata.get("paper_color", "#3B82F6"),  # Default color if not found
                 "bbox": eval(metadata["bbox"]), # Unsafe but quick for now
                 "embedding": result["embeddings"][i]
-            })
+            }
+            
+            # Check if new_embedding exists in metadata
+            if use_new_embeddings and "new_embedding" in metadata:
+                # Parse the new_embedding from string back to list
+                import json
+                node["embedding"] = json.loads(metadata["new_embedding"])
+            
+            nodes.append(node)
             
     graph_data = graph_service.build_graph(nodes)
     return graph_data
@@ -448,3 +456,107 @@ def get_node_tags(node_id: str):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+@app.get("/projects/{project_id}/tags/summary", response_model=List[TagSummary])
+def get_tag_summary(project_id: int):
+    """Get summary of all tags with node counts for a project"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get all tags (global + local for this project) with node counts
+    cursor.execute("""
+        SELECT 
+            t.id as tag_id,
+            t.name as tag_name,
+            t.type as tag_type,
+            COUNT(nt.node_id) as node_count
+        FROM tags t
+        LEFT JOIN node_tags nt ON t.id = nt.tag_id
+        WHERE t.type = 'global' OR (t.type = 'local' AND t.project_id = %s)
+        GROUP BY t.id, t.name, t.type
+        ORDER BY t.name
+    """, (project_id,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.post("/projects/{project_id}/embeddings/compute", response_model=ComputeEmbeddingsResponse)
+def compute_new_embeddings(project_id: int):
+    """Compute new embeddings for all nodes in a project"""
+    import json
+    
+    collection = get_chroma_collection(project_id)
+    
+    # Fetch all nodes with embeddings
+    result = collection.get(include=["embeddings", "metadatas"])
+    
+    if not result["ids"]:
+        return ComputeEmbeddingsResponse(
+            status="success",
+            message="No nodes found in project",
+            nodes_processed=0
+        )
+    
+    # Fetch all tags for all nodes in one query
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get all node-tag relationships for this project's nodes
+    node_ids = result["ids"]
+    cursor.execute("""
+        SELECT nt.node_id, t.id as tag_id, t.name as tag_name, t.type as tag_type
+        FROM node_tags nt
+        JOIN tags t ON nt.tag_id = t.id
+        WHERE nt.node_id = ANY(%s)
+        ORDER BY nt.node_id, t.name
+    """, (node_ids,))
+    
+    tag_rows = cursor.fetchall()
+    conn.close()
+    
+    # Build a dictionary of node_id -> list of tags
+    node_tags_map = {}
+    for row in tag_rows:
+        node_id = row["node_id"]
+        if node_id not in node_tags_map:
+            node_tags_map[node_id] = []
+        node_tags_map[node_id].append({
+            "tag_id": row["tag_id"],
+            "tag_name": row["tag_name"],
+            "tag_type": row["tag_type"]
+        })
+    
+    # Build nodes list with tags
+    nodes = []
+    for i, id in enumerate(result["ids"]):
+        nodes.append({
+            "id": id,
+            "embedding": result["embeddings"][i],
+            "metadata": result["metadatas"][i],
+            "tags": node_tags_map.get(id, [])  # Include tags, empty list if no tags
+        })
+    
+    # Compute new embeddings
+    nodes_with_new = embedding_service.compute_new_embeddings(nodes)
+    
+    # Update ChromaDB metadata with new embeddings
+    updated_metadatas = []
+    for node in nodes_with_new:
+        metadata = node["metadata"].copy()
+        if "new_embedding" in node:
+            # Store as JSON string in metadata
+            metadata["new_embedding"] = json.dumps(node["new_embedding"])
+        updated_metadatas.append(metadata)
+    
+    # Update the collection
+    collection.update(
+        ids=result["ids"],
+        metadatas=updated_metadatas
+    )
+    
+    return ComputeEmbeddingsResponse(
+        status="success",
+        message=f"Successfully computed new embeddings for {len(nodes_with_new)} nodes",
+        nodes_processed=len(nodes_with_new)
+    )

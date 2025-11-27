@@ -3,6 +3,7 @@ import { ProjectList } from './components/ProjectList';
 import { GraphView } from './components/GraphView';
 import { PapersSidebar } from './components/PapersSidebar';
 import { PDFViewer } from './components/PDFViewer';
+import { AdvancedViewPanel } from './components/AdvancedViewPanel';
 
 import { api } from './api';
 import type { Project, GraphData, Node } from './api';
@@ -15,11 +16,12 @@ function App() {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
     try {
-      const data = await api.getGraph(project.id);
+      const data = await api.getGraph(project.id, useNewEmbeddings);
       setGraphData(data);
       setCurrentView('graph');
     } catch (error) {
@@ -35,7 +37,7 @@ function App() {
 
     console.log('Refreshing graph after paper deletion/upload...');
     try {
-      const data = await api.getGraph(selectedProject.id);
+      const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
       console.log(`Received graph data: ${data.nodes.length} nodes, ${data.edges.length} edges`);
       setGraphData(data);
       setCurrentView('graph');
@@ -48,7 +50,7 @@ function App() {
     if (!selectedProject) return;
 
     try {
-      const data = await api.getGraph(selectedProject.id);
+      const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
       setGraphData(data);
       setCurrentView('graph');
     } catch (error) {
@@ -71,6 +73,19 @@ function App() {
     // In GraphView.tsx: onNodeClick(node.data.original)
     // So we get the raw API Node object.
     setSelectedNode(node);
+  };
+
+  const handleToggleEmbeddings = async (useNew: boolean) => {
+    setUseNewEmbeddings(useNew);
+    if (!selectedProject) return;
+
+    // Refresh graph with new embedding setting
+    try {
+      const data = await api.getGraph(selectedProject.id, useNew);
+      setGraphData(data);
+    } catch (error) {
+      console.error('Failed to reload graph:', error);
+    }
   };
 
   return (
@@ -131,6 +146,12 @@ function App() {
                 </div>
                 <div className="flex-1 relative overflow-hidden">
                   <GraphView data={graphData} onNodeClick={handleNodeClick} />
+                  {/* Floating Advanced View Panel */}
+                  <AdvancedViewPanel
+                    projectId={selectedProject.id}
+                    useNewEmbeddings={useNewEmbeddings}
+                    onToggleEmbeddings={handleToggleEmbeddings}
+                  />
                   {/* Floating Papers Sidebar */}
                   <PapersSidebar
                     projectId={selectedProject.id}

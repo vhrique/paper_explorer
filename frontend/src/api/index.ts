@@ -51,6 +51,13 @@ export interface Tag {
     created_at: string;
 }
 
+export interface TagSummary {
+    tag_id: number;
+    tag_name: string;
+    tag_type: string;
+    node_count: number;
+}
+
 export const api = {
     createProject: async (name: string, description: string): Promise<Project> => {
         const response = await axios.post(`${API_URL}/projects/`, { name, description });
@@ -73,8 +80,10 @@ export const api = {
         return response.data;
     },
 
-    getGraph: async (projectId: number): Promise<GraphData> => {
-        const response = await axios.get(`${API_URL}/projects/${projectId}/graph`);
+    getGraph: async (projectId: number, useNewEmbeddings: boolean = false): Promise<GraphData> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/graph`, {
+            params: { use_new_embeddings: useNewEmbeddings }
+        });
         return response.data;
     },
 
@@ -124,6 +133,17 @@ export const api = {
 
     getNodeTags: async (nodeId: string): Promise<Tag[]> => {
         const response = await axios.get(`${API_URL}/nodes/${nodeId}/tags`);
+        return response.data;
+    },
+
+    // Advanced View API
+    getTagSummary: async (projectId: number): Promise<TagSummary[]> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/tags/summary`);
+        return response.data;
+    },
+
+    computeNewEmbeddings: async (projectId: number): Promise<{ status: string; message: string; nodes_processed: number }> => {
+        const response = await axios.post(`${API_URL}/projects/${projectId}/embeddings/compute`);
         return response.data;
     }
 };

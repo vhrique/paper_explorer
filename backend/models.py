@@ -73,3 +73,14 @@ class NodeTag(BaseModel):
 
     class Config:
         from_attributes = True
+
+class TagSummary(BaseModel):
+    tag_id: int
+    tag_name: str
+    tag_type: str
+    node_count: int
+
+class ComputeEmbeddingsResponse(BaseModel):
+    status: str
+    message: str
+    nodes_processed: int
