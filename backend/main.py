@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -68,11 +68,28 @@ def delete_project(project_id: int):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Delete the project (cascade will handle papers)
-    cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-    
-    conn.commit()
-    conn.close()
+    try:
+        # Get all node IDs from ChromaDB for this project
+        collection = get_chroma_collection(project_id)
+        result = collection.get(include=[])
+        
+        if result["ids"]:
+            # Delete all node_tags entries for nodes in this project
+            cursor.execute(
+                "DELETE FROM node_tags WHERE node_id = ANY(%s)",
+                (result["ids"],)
+            )
+        
+        # Delete the project (cascade will handle papers and local tags)
+        cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting project: {e}")
+        raise
+    finally:
+        conn.close()
     
     return {"message": "Project deleted successfully"}
 
@@ -456,6 +473,192 @@ def get_node_tags(node_id: str):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+@app.delete("/tags/{tag_id}")
+def delete_tag(tag_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Delete the tag (cascade should handle node_tags if configured, but let's be safe)
+        # First delete from node_tags
+        cursor.execute("DELETE FROM node_tags WHERE tag_id = %s", (tag_id,))
+        # Then delete the tag
+        cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+        conn.commit()
+        return {"message": "Tag deleted successfully"}
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting tag: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete tag")
+    finally:
+        conn.close()
+
+@app.patch("/tags/{tag_id}", response_model=Tag)
+def update_tag(tag_id: int, tag_update: TagUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    try:
+        # Check if tag exists
+        cursor.execute("SELECT * FROM tags WHERE id = %s", (tag_id,))
+        existing_tag = cursor.fetchone()
+        
+        if not existing_tag:
+            raise HTTPException(status_code=404, detail="Tag not found")
+            
+        if tag_update.name:
+            # Check if a tag with the new name already exists in the same scope
+            # Scope is defined by (name, type, project_id)
+            cursor.execute("""
+                SELECT * FROM tags 
+                WHERE name = %s 
+                AND type = %s 
+                AND project_id IS NOT DISTINCT FROM %s
+                AND id != %s
+            """, (
+                tag_update.name, 
+                existing_tag['type'], 
+                existing_tag['project_id'], 
+                tag_id
+            ))
+            target_tag = cursor.fetchone()
+            
+            if target_tag:
+                # MERGE LOGIC
+                target_tag_id = target_tag['id']
+                
+                # 1. Move nodes from old tag to new tag, ignoring duplicates
+                # We select all nodes from the old tag and try to insert them for the new tag
+                # ON CONFLICT DO NOTHING handles cases where the node already has the new tag
+                cursor.execute("""
+                    INSERT INTO node_tags (tag_id, node_id)
+                    SELECT %s, node_id FROM node_tags WHERE tag_id = %s
+                    ON CONFLICT (tag_id, node_id) DO NOTHING
+                """, (target_tag_id, tag_id))
+                
+                # 2. Delete old tag (cascade will remove remaining node_tags entries for old tag)
+                cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+                
+                conn.commit()
+                return dict(target_tag)
+            
+            else:
+                # NORMAL RENAME
+                cursor.execute(
+                    "UPDATE tags SET name = %s WHERE id = %s RETURNING *",
+                    (tag_update.name, tag_id)
+                )
+                updated_tag = cursor.fetchone()
+                conn.commit()
+                return dict(updated_tag)
+            
+        return dict(existing_tag)
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Tag name already exists")
+    finally:
+        conn.close()
+
+@app.get("/projects/{project_id}/tags/{tag_id}/nodes")
+def get_tag_nodes(project_id: int, tag_id: int):
+    """Get all nodes in a project that have a specific tag"""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get nodes from this project that have the tag
+    # We need to join with papers to filter by project_id
+    cursor.execute("""
+        SELECT 
+            nt.node_id,
+            nt.created_at as tagged_at
+        FROM node_tags nt
+        JOIN tags t ON nt.tag_id = t.id
+        -- We need to check if the node belongs to the project
+        -- Since node_id is a string from ChromaDB/PDF processing, we can't directly join with papers table easily 
+        -- unless we parse the node_id or look up in ChromaDB.
+        -- However, our node_id format usually implies paper_id or we can fetch metadata.
+        -- BUT, for now let's rely on the fact that we can fetch node metadata from ChromaDB.
+        WHERE nt.tag_id = %s
+    """, (tag_id,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return []
+        
+    # Now we need to fetch the actual node content from ChromaDB to display snippets
+    # This is a bit heavy but necessary for the UI
+    collection = get_chroma_collection(project_id)
+    
+    node_ids = [row['node_id'] for row in rows]
+    
+    try:
+        results = collection.get(
+            ids=node_ids,
+            include=["metadatas", "documents"]
+        )
+        
+        # Create a map for quick lookup
+        chroma_nodes = {}
+        if results['ids']:
+            for i, nid in enumerate(results['ids']):
+                chroma_nodes[nid] = {
+                    "content": results['documents'][i],
+                    "metadata": results['metadatas'][i]
+                }
+        
+        # Merge data
+        tagged_nodes = []
+        for row in rows:
+            nid = row['node_id']
+            if nid in chroma_nodes:
+                node_data = chroma_nodes[nid]
+                metadata = node_data['metadata']
+                
+                # Only include if it belongs to the requested project (double check)
+                if int(metadata.get('paper_id', 0)) in [p['id'] for p in _get_project_papers(project_id)]:
+                     tagged_nodes.append({
+                        "node_id": nid,
+                        "content": node_data['content'],
+                        "page_number": metadata.get('page_number'),
+                        "paper_id": metadata.get('paper_id'),
+                        "paper_color": metadata.get('paper_color'),
+                        "bbox": eval(metadata.get('bbox', '[]')),
+                        "tagged_at": row['tagged_at']
+                    })
+                else:
+                    # If we can't verify project ownership easily via helper, 
+                    # we can rely on the fact that get_chroma_collection(project_id) 
+                    # only returns nodes for that project (if using separate collections per project).
+                    # Our get_chroma_collection uses "project_{project_id}" so it IS scoped to project.
+                    # So if it's in the collection, it's in the project.
+                    tagged_nodes.append({
+                        "node_id": nid,
+                        "content": node_data['content'],
+                        "page_number": metadata.get('page_number'),
+                        "paper_id": metadata.get('paper_id'),
+                        "paper_color": metadata.get('paper_color'),
+                        "bbox": eval(metadata.get('bbox', '[]')),
+                        "tagged_at": row['tagged_at']
+                    })
+                    
+        return tagged_nodes
+        
+    except Exception as e:
+        print(f"Error fetching node details from ChromaDB: {e}")
+        return []
+
+def _get_project_papers(project_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT id FROM papers WHERE project_id = %s", (project_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
 
 @app.get("/projects/{project_id}/tags/summary", response_model=List[TagSummary])
 def get_tag_summary(project_id: int):

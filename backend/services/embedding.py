@@ -57,7 +57,9 @@ class EmbeddingService:
 
         # Combine current project nodes with external nodes for training
         all_training_nodes = nodes.copy()
+        print(f"Using {len(all_training_nodes)} nodes from the current project.")
         if external_nodes:
+            print(f"Fetched {len(external_nodes)} external nodes with global tags from other projects")
             all_training_nodes.extend(external_nodes)
 
         for node in all_training_nodes:
@@ -73,12 +75,14 @@ class EmbeddingService:
             raise ValueError("No nodes have tags; cannot train SVM.")
 
         X_train = np.array(X_train, dtype=float)
+        print(f"Training SVM with {len(X_train)} samples.")
 
         # -----------------------------
         # 2. Encode tags (multi-label)
         # -----------------------------
         mlb = MultiLabelBinarizer()
         Y_train = mlb.fit_transform(tag_list)  # shape: (num_samples, num_tags)
+        print(f"Using a total of {Y_train.sum()} tags.")
 
         # -----------------------------
         # 3. Train probabilistic SVM
@@ -101,7 +105,7 @@ class EmbeddingService:
             emb_np = np.array(emb, dtype=float).reshape(1, -1)
 
             # predict_proba returns shape (1, num_tags)
-            probs = clf.predict_proba(emb_np)[0].tolist()
+            probs = clf.decision_function(emb_np)[0].tolist()
             node["new_embedding"] = probs
 
         return nodes

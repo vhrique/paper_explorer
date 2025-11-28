@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { api } from '../api';
-import type { TagSummary } from '../api';
 import { Settings, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 
 interface AdvancedViewPanelProps {
@@ -14,28 +13,10 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
     useNewEmbeddings,
     onToggleEmbeddings
 }) => {
-    const [tagSummary, setTagSummary] = useState<TagSummary[]>([]);
     const [isExpanded, setIsExpanded] = useState(true);
-    const [isLoading, setIsLoading] = useState(true);
     const [isComputing, setIsComputing] = useState(false);
     const [computeMessage, setComputeMessage] = useState<string | null>(null);
     const [useGlobalContext, setUseGlobalContext] = useState(false);
-
-    const loadTagSummary = async () => {
-        try {
-            setIsLoading(true);
-            const data = await api.getTagSummary(projectId);
-            setTagSummary(data);
-        } catch (error) {
-            console.error('Failed to load tag summary:', error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        loadTagSummary();
-    }, [projectId]);
 
     const handleComputeEmbeddings = async () => {
         try {
@@ -88,36 +69,6 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
 
             {/* Content */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {/* Tag Summary Section */}
-                <div className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-lg p-4">
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Tag Summary</h3>
-                    {isLoading ? (
-                        <div className="text-center text-gray-500 py-4 text-sm">Loading tags...</div>
-                    ) : tagSummary.length === 0 ? (
-                        <div className="text-center text-gray-400 py-4 text-sm">No tags yet</div>
-                    ) : (
-                        <div className="space-y-2">
-                            {tagSummary.map((tag) => (
-                                <div
-                                    key={tag.tag_id}
-                                    className="flex items-center justify-between p-2 bg-white rounded-lg border border-gray-200"
-                                >
-                                    <div className="flex items-center gap-2">
-                                        <span className={`px-2 py-0.5 text-xs rounded-full ${tag.tag_type === 'global'
-                                            ? 'bg-blue-100 text-blue-700'
-                                            : 'bg-green-100 text-green-700'
-                                            }`}>
-                                            {tag.tag_type}
-                                        </span>
-                                        <span className="text-sm font-medium text-gray-800">{tag.tag_name}</span>
-                                    </div>
-                                    <span className="text-xs text-gray-500">{tag.node_count} nodes</span>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
                 {/* Embedding Controls Section */}
                 <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-lg p-4">
                     <h3 className="text-sm font-semibold text-gray-700 mb-3">Embedding View</h3>
