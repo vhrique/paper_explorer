@@ -13,9 +13,10 @@ interface PDFViewerProps {
     node: Node;
     onClose: () => void;
     projectId: number;
+    onTagsUpdated?: () => void;
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated }) => {
     const [paper, setPaper] = useState<Paper | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.0);
@@ -254,6 +255,11 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId }
                                         setTags(updatedTags);
                                         setNewTagName('');
                                         setShowTagInput(false);
+
+                                        // Notify parent that tags were updated
+                                        if (onTagsUpdated) {
+                                            onTagsUpdated();
+                                        }
                                     } catch (error) {
                                         console.error('Failed to add tag:', error);
                                     }
