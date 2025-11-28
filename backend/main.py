@@ -357,7 +357,21 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
     result = collection.get(include=["embeddings", "metadatas", "documents"])
     
     nodes = []
+    node_ids = []
     if result["ids"]:
+        node_ids = result["ids"]
+        
+        # Fetch tag information for all nodes in one query
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT DISTINCT node_id
+            FROM node_tags
+            WHERE node_id = ANY(%s)
+        """, (node_ids,))
+        tagged_node_ids = {row["node_id"] for row in cursor.fetchall()}
+        conn.close()
+        
         for i, id in enumerate(result["ids"]):
             metadata = result["metadatas"][i]
             
@@ -374,7 +388,8 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
                 "paper_id": metadata["paper_id"],
                 "paper_color": metadata.get("paper_color", "#3B82F6"),  # Default color if not found
                 "bbox": eval(metadata["bbox"]), # Unsafe but quick for now
-                "embedding": result["embeddings"][i]
+                "embedding": result["embeddings"][i],
+                "has_tags": id in tagged_node_ids  # Add tag indicator
             }
             
             # Check if new_embedding exists in metadata

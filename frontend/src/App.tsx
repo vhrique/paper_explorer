@@ -77,9 +77,19 @@ function App() {
     setSelectedNode(node);
   };
 
-  const handleTagsUpdated = () => {
+  const handleTagsUpdated = async () => {
     // Increment the key to force TagsPanel to refresh
     setTagRefreshKey(prev => prev + 1);
+
+    // Also refresh the graph to update has_tags status
+    if (selectedProject) {
+      try {
+        const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
+        setGraphData(data);
+      } catch (error) {
+        console.error('Failed to refresh graph after tag update:', error);
+      }
+    }
   };
 
   const handleToggleEmbeddings = async (useNew: boolean) => {
