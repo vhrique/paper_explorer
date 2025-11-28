@@ -59,6 +59,10 @@ class TagBase(BaseModel):
 class TagCreate(TagBase):
     pass
 
+class TagUpdate(BaseModel):
+    name: Optional[str] = None
+
+
 class Tag(TagBase):
     id: int
     created_at: datetime

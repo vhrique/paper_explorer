@@ -147,5 +147,19 @@ export const api = {
             params: { use_global_context: useGlobalContext }
         });
         return response.data;
+    },
+
+    deleteTag: async (tagId: number): Promise<void> => {
+        await axios.delete(`${API_URL}/tags/${tagId}`);
+    },
+
+    updateTag: async (tagId: number, name: string): Promise<Tag> => {
+        const response = await axios.patch(`${API_URL}/tags/${tagId}`, { name });
+        return response.data;
+    },
+
+    getTagNodes: async (projectId: number, tagId: number): Promise<any[]> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/tags/${tagId}/nodes`);
+        return response.data;
     }
 };

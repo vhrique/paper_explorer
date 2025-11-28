@@ -4,6 +4,7 @@ import { GraphView } from './components/GraphView';
 import { PapersSidebar } from './components/PapersSidebar';
 import { PDFViewer } from './components/PDFViewer';
 import { AdvancedViewPanel } from './components/AdvancedViewPanel';
+import { TagsPanel } from './components/TagsPanel';
 
 import { api } from './api';
 import type { Project, GraphData, Node } from './api';
@@ -92,7 +93,7 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-sm border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4">
+        <div className="max-w-full mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               {currentView !== 'projects' && (
@@ -121,7 +122,7 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      <main className="max-w mx-auto px-20 py-8">
         {currentView === 'projects' && (
           <ProjectList onSelectProject={handleSelectProject} />
         )}
@@ -156,6 +157,11 @@ function App() {
                   <PapersSidebar
                     projectId={selectedProject.id}
                     onUploadComplete={handleUploadComplete}
+                  />
+                  {/* Floating Tags Panel */}
+                  <TagsPanel
+                    projectId={selectedProject.id}
+                    onNodeClick={handleNodeClick}
                   />
                 </div>
               </div>

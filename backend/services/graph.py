@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import MinMaxScaler
+# from sklearn.decomposition import PCA
 # from sklearn.decomposition import KernelPCA
 from openTSNE import TSNE
 import numpy as np
@@ -24,6 +25,8 @@ class GraphService:
         # This places semantically similar content close together
         if len(embeddings) >= 2:
             n_components = min(2, len(embeddings))
+            # pca = PCA(n_components=n_components)
+            # positions_2d = pca.fit_transform(embeddings_array)
             # pca = KernelPCA(n_components=n_components, kernel='cosine')
             # positions_2d = pca.fit_transform(embeddings_array)
             tsne = TSNE(n_components=n_components).fit(embeddings_array)
