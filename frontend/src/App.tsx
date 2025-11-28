@@ -19,6 +19,7 @@ function App() {
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
   const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
@@ -92,6 +93,18 @@ function App() {
     }
   };
 
+  const handlePDFClick = (nodeId: string) => {
+    // Find the node in the graph data
+    if (!graphData) return;
+
+    const node = graphData.nodes.find(n => n.id === nodeId);
+    if (node) {
+      console.log('PDF click - selecting node:', nodeId);
+      setSelectedNode(node);
+      setSelectedNodeId(nodeId);  // Trigger graph focus
+    }
+  };
+
   const handleToggleEmbeddings = async (useNew: boolean) => {
     setUseNewEmbeddings(useNew);
     if (!selectedProject) return;
@@ -162,7 +175,11 @@ function App() {
                   </div>
                 </div>
                 <div className="flex-1 relative overflow-hidden">
-                  <GraphView data={graphData} onNodeClick={handleNodeClick} />
+                  <GraphView
+                    data={graphData}
+                    onNodeClick={handleNodeClick}
+                    selectedNodeId={selectedNodeId}
+                  />
                   {/* Floating Advanced View Panel */}
                   <AdvancedViewPanel
                     projectId={selectedProject.id}
@@ -192,6 +209,8 @@ function App() {
                     onClose={() => setSelectedNode(null)}
                     projectId={selectedProject.id}
                     onTagsUpdated={handleTagsUpdated}
+                    onPDFClick={handlePDFClick}
+                    allNodes={graphData.nodes}
                   />
                 </div>
               )}

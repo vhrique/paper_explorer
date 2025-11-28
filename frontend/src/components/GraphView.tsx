@@ -71,11 +71,42 @@ const nodeTypes: NodeTypes = {
 interface GraphViewProps {
     data: { nodes: APINode[], edges: APIEdge[] };
     onNodeClick: (node: APINode) => void;
+    selectedNodeId?: string;  // Externally selected node (e.g., from PDF click)
 }
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+    const reactFlowInstance = React.useRef<any>(null);
+
+    // Focus on selected node when selectedNodeId changes
+    useEffect(() => {
+        if (selectedNodeId && reactFlowInstance.current) {
+            const node = nodes.find(n => n.id === selectedNodeId);
+            if (node) {
+                // Center the view on the selected node
+                reactFlowInstance.current.fitView({
+                    nodes: [{ id: selectedNodeId }],
+                    duration: 800,
+                    padding: 0.5,
+                });
+
+                // Temporarily highlight the node
+                setNodes(nds => nds.map(n => ({
+                    ...n,
+                    className: n.id === selectedNodeId ? 'selected-node-highlight' : ''
+                })));
+
+                // Remove highlight after 2 seconds
+                setTimeout(() => {
+                    setNodes(nds => nds.map(n => ({
+                        ...n,
+                        className: ''
+                    })));
+                }, 2000);
+            }
+        }
+    }, [selectedNodeId, nodes.length]);
 
     // Transform API data to React Flow format using PCA-based positions
     useEffect(() => {
@@ -137,6 +168,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick }) => {
                 onEdgesChange={onEdgesChange}
                 onNodeClick={handleNodeClick}
                 nodeTypes={nodeTypes}
+                onInit={(instance) => { reactFlowInstance.current = instance; }}
                 fitView
                 fitViewOptions={{ padding: 0.2, duration: 800 }}
                 minZoom={0.05}
