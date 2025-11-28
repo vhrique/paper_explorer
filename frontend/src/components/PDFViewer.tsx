@@ -14,15 +14,18 @@ interface PDFViewerProps {
     onClose: () => void;
     projectId: number;
     onTagsUpdated?: () => void;
+    onPDFClick?: (nodeId: string) => void;
+    allNodes?: Node[];  // All nodes in the project for hit detection
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated, onPDFClick, allNodes }) => {
     const [paper, setPaper] = useState<Paper | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const highlightedPageRef = useRef<HTMLDivElement>(null);
+    const [pageDimensions, setPageDimensions] = useState<Map<number, { width: number; height: number }>>(new Map());
 
     // Tag management state
     const [tags, setTags] = useState<Tag[]>([]);
@@ -101,6 +104,60 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
 
     const handleZoomIn = () => setScale(prev => Math.min(prev + 0.2, 3.0));
     const handleZoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
+
+    // Handle clicks on PDF pages to select nodes
+    const handlePageClick = (e: React.MouseEvent<HTMLDivElement>, pageNumber: number) => {
+        if (!onPDFClick || !allNodes) return;
+
+        const pageDim = pageDimensions.get(pageNumber);
+        if (!pageDim) return;
+
+        // Find the actual canvas element (rendered by react-pdf)
+        const canvas = e.currentTarget.querySelector('canvas');
+        if (!canvas) return;
+
+        // Get click position relative to the canvas
+        const rect = canvas.getBoundingClientRect();
+        const clickX = e.clientX - rect.left;
+        const clickY = e.clientY - rect.top;
+
+        // Transform to PDF coordinates (accounting for scale)
+        // PDF coordinates: origin at top-left (matching backend bbox format)
+        // Browser coordinates: origin at top-left
+        const pdfX = clickX / scale;
+        const pdfY = clickY / scale;
+
+        console.log('Click:', { clickX, clickY, pdfX, pdfY, scale, pageDim });
+
+        // Find all nodes on this page FROM THE CURRENT PAPER ONLY
+        const nodesOnPage = allNodes.filter(n =>
+            n.page_number === pageNumber && n.paper_id === node.paper_id
+        );
+
+        // Find nodes whose bounding box contains the click point
+        const clickedNodes = nodesOnPage.filter(n => {
+            const [x0, y0, x1, y1] = n.bbox;
+            const contains = pdfX >= x0 && pdfX <= x1 && pdfY >= y0 && pdfY <= y1;
+            if (contains) {
+                console.log('Node bbox:', { id: n.id, bbox: n.bbox, contains });
+            }
+            return contains;
+        });
+
+        console.log('Clicked nodes:', clickedNodes.length);
+
+        if (clickedNodes.length === 0) return;
+
+        // If multiple overlapping boxes, select the smallest one (most specific)
+        const selectedNode = clickedNodes.reduce((smallest, current) => {
+            const smallestArea = (smallest.bbox[2] - smallest.bbox[0]) * (smallest.bbox[3] - smallest.bbox[1]);
+            const currentArea = (current.bbox[2] - current.bbox[0]) * (current.bbox[3] - current.bbox[1]);
+            return currentArea < smallestArea ? current : smallest;
+        });
+
+        console.log('Selected node:', selectedNode.id);
+        onPDFClick(selectedNode.id);
+    };
 
     if (loading) {
         return (
@@ -310,13 +367,30 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                                     className="relative mb-4 inline-block"
                                     ref={isHighlightedPage ? highlightedPageRef : null}
                                 >
-                                    <Page
-                                        pageNumber={pageNumber}
-                                        scale={scale}
-                                        renderTextLayer={true}
-                                        renderAnnotationLayer={true}
-                                        className="shadow-lg"
-                                    />
+                                    <div
+                                        onClick={(e) => handlePageClick(e, pageNumber)}
+                                        className="relative cursor-pointer"
+                                        style={{ display: 'inline-block' }}
+                                    >
+                                        <Page
+                                            pageNumber={pageNumber}
+                                            scale={scale}
+                                            renderTextLayer={true}
+                                            renderAnnotationLayer={true}
+                                            className="shadow-lg"
+                                            onLoadSuccess={(page) => {
+                                                // Store page dimensions for coordinate transformation
+                                                setPageDimensions(prev => {
+                                                    const newMap = new Map(prev);
+                                                    newMap.set(pageNumber, {
+                                                        width: page.width,
+                                                        height: page.height
+                                                    });
+                                                    return newMap;
+                                                });
+                                            }}
+                                        />
+                                    </div>
                                     {/* Only show highlight on the correct page */}
                                     {isHighlightedPage && (
                                         <div
