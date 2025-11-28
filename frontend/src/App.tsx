@@ -18,6 +18,7 @@ function App() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
+  const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
@@ -74,6 +75,11 @@ function App() {
     // In GraphView.tsx: onNodeClick(node.data.original)
     // So we get the raw API Node object.
     setSelectedNode(node);
+  };
+
+  const handleTagsUpdated = () => {
+    // Increment the key to force TagsPanel to refresh
+    setTagRefreshKey(prev => prev + 1);
   };
 
   const handleToggleEmbeddings = async (useNew: boolean) => {
@@ -160,6 +166,7 @@ function App() {
                   />
                   {/* Floating Tags Panel */}
                   <TagsPanel
+                    key={tagRefreshKey}
                     projectId={selectedProject.id}
                     onNodeClick={handleNodeClick}
                   />
@@ -174,6 +181,7 @@ function App() {
                     node={selectedNode}
                     onClose={() => setSelectedNode(null)}
                     projectId={selectedProject.id}
+                    onTagsUpdated={handleTagsUpdated}
                   />
                 </div>
               )}
