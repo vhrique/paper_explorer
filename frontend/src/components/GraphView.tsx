@@ -15,9 +15,18 @@ import type { Node as APINode, Edge as APIEdge } from '../api';
 // Custom Node Components
 const TextNode = ({ data }: any) => {
     const borderColor = data.original?.paper_color || '#3B82F6';
+    const hasTags = data.original?.has_tags || false;
+
     return (
-        <div className="px-4 py-2 shadow-md rounded-md bg-white w-64" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
+        <div className="px-4 py-2 shadow-md rounded-md bg-white w-64 relative" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
+            {hasTags && (
+                <div className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center" title="Has tags">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
+                        <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                    </svg>
+                </div>
+            )}
             <div className="flex items-center">
                 <div className="ml-2">
                     <div className="text-xs font-bold text-gray-500 mb-1">Page {data.page_number}</div>
@@ -31,9 +40,18 @@ const TextNode = ({ data }: any) => {
 
 const ImageNode = ({ data }: any) => {
     const borderColor = data.original?.paper_color || '#8B5CF6';
+    const hasTags = data.original?.has_tags || false;
+
     return (
-        <div className="shadow-md rounded-md bg-white p-1" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
+        <div className="shadow-md rounded-md bg-white p-1 relative" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
+            {hasTags && (
+                <div className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center z-10" title="Has tags">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
+                        <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                    </svg>
+                </div>
+            )}
             <img
                 src={data.content}
                 alt="Extracted"

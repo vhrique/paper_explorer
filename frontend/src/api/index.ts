@@ -29,6 +29,7 @@ export interface Node {
     paper_id: number;
     paper_color?: string;
     position?: { x: number; y: number };  // PCA-based position from backend
+    has_tags?: boolean;  // Whether this node has any tags
 }
 
 export interface Edge {

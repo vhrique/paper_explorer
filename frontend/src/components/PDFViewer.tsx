@@ -202,6 +202,11 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                                     await api.removeNodeTag(node.id, tag.id);
                                     const updatedTags = await api.getNodeTags(node.id);
                                     setTags(updatedTags);
+
+                                    // Notify parent that tags were updated
+                                    if (onTagsUpdated) {
+                                        onTagsUpdated();
+                                    }
                                 }}
                                 className="hover:text-red-600"
                             >
