@@ -6,28 +6,37 @@ interface AdvancedViewPanelProps {
     projectId: number;
     useNewEmbeddings: boolean;
     onToggleEmbeddings: (useNew: boolean) => void;
+    useGlobalContext: boolean;
+    onToggleGlobalContext: (useGlobal: boolean) => void;
+    automaticRefresh: boolean;
+    onToggleAutomaticRefresh: (auto: boolean) => void;
+    onRefreshView: () => Promise<any>;
 }
 
 export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
     projectId,
     useNewEmbeddings,
-    onToggleEmbeddings
+    onToggleEmbeddings,
+    useGlobalContext,
+    onToggleGlobalContext,
+    automaticRefresh,
+    onToggleAutomaticRefresh,
+    onRefreshView
 }) => {
     const [isExpanded, setIsExpanded] = useState(true);
     const [isComputing, setIsComputing] = useState(false);
     const [computeMessage, setComputeMessage] = useState<string | null>(null);
-    const [useGlobalContext, setUseGlobalContext] = useState(false);
 
-    const handleComputeEmbeddings = async () => {
+    const handleRefresh = async () => {
         try {
             setIsComputing(true);
             setComputeMessage(null);
-            const result = await api.computeNewEmbeddings(projectId, useGlobalContext);
+            const result = await onRefreshView();
             setComputeMessage(`✓ ${result.message}`);
             setTimeout(() => setComputeMessage(null), 5000);
         } catch (error) {
-            console.error('Failed to compute embeddings:', error);
-            setComputeMessage('✗ Failed to compute new embeddings');
+            console.error('Failed to refresh view:', error);
+            setComputeMessage('✗ Failed to refresh view');
             setTimeout(() => setComputeMessage(null), 5000);
         } finally {
             setIsComputing(false);
@@ -92,7 +101,7 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                     </div>
 
                     {/* Global Context Toggle */}
-                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-gray-200">
+                    <div className="flex items-center justify-between mb-3 p-3 bg-white rounded-lg border border-gray-200">
                         <div className="flex flex-col">
                             <label htmlFor="global-context-toggle" className="text-sm font-medium text-gray-700 cursor-pointer">
                                 Use Global Tags Info
@@ -101,7 +110,7 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                         </div>
                         <button
                             id="global-context-toggle"
-                            onClick={() => setUseGlobalContext(!useGlobalContext)}
+                            onClick={() => onToggleGlobalContext(!useGlobalContext)}
                             className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useGlobalContext ? 'bg-purple-600' : 'bg-gray-300'
                                 }`}
                         >
@@ -112,14 +121,35 @@ export const AdvancedViewPanel: React.FC<AdvancedViewPanelProps> = ({
                         </button>
                     </div>
 
+                    {/* Automatic Refresh Toggle */}
+                    <div className="flex items-center justify-between mb-3 p-3 bg-white rounded-lg border border-gray-200">
+                        <div className="flex flex-col">
+                            <label htmlFor="automatic-refresh-toggle" className="text-sm font-medium text-gray-700 cursor-pointer">
+                                Automatic Refresh
+                            </label>
+                            <span className="text-xs text-gray-500 mt-0.5">Recompute on tag changes</span>
+                        </div>
+                        <button
+                            id="automatic-refresh-toggle"
+                            onClick={() => onToggleAutomaticRefresh(!automaticRefresh)}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${automaticRefresh ? 'bg-green-600' : 'bg-gray-300'
+                                }`}
+                        >
+                            <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${automaticRefresh ? 'translate-x-6' : 'translate-x-1'
+                                    }`}
+                            />
+                        </button>
+                    </div>
+
                     {/* Compute Button */}
                     <button
-                        onClick={handleComputeEmbeddings}
+                        onClick={handleRefresh}
                         disabled={isComputing}
                         className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                     >
                         <Sparkles size={18} />
-                        {isComputing ? 'Computing...' : 'Compute New View'}
+                        {isComputing ? 'Refreshing...' : 'Refresh View'}
                     </button>
 
                     {/* Message */}

@@ -85,8 +85,11 @@ function App() {
     // Also refresh the graph to update has_tags status
     if (selectedProject) {
       try {
-        const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
-        setGraphData(data);
+        if (automaticRefresh) {
+          await handleComputeAndRefresh();
+        } else {
+          await handleRefreshView();
+        }
       } catch (error) {
         console.error('Failed to refresh graph after tag update:', error);
       }
@@ -115,6 +118,46 @@ function App() {
       setGraphData(data);
     } catch (error) {
       console.error('Failed to reload graph:', error);
+    }
+  };
+
+  const [useGlobalContext, setUseGlobalContext] = useState(false);
+  const [automaticRefresh, setAutomaticRefresh] = useState(false);
+
+  const handleRefreshView = async () => {
+    if (!selectedProject) return;
+    try {
+      const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
+      setGraphData(data);
+      return { status: 'success', message: 'View refreshed' };
+    } catch (error) {
+      console.error('Failed to refresh view:', error);
+      throw error;
+    }
+  };
+
+  const handleComputeAndRefresh = async () => {
+    if (!selectedProject) return;
+    try {
+      await api.computeNewEmbeddings(selectedProject.id, useGlobalContext);
+      await handleRefreshView();
+    } catch (error) {
+      console.error('Failed to compute and refresh:', error);
+      throw error;
+    }
+  };
+
+  const handleToggleGlobalContext = async (useGlobal: boolean) => {
+    setUseGlobalContext(useGlobal);
+    // When toggling global context, we should recompute embeddings immediately
+    if (selectedProject) {
+      // We need to pass the NEW value of useGlobal, not the state which might be stale
+      try {
+        await api.computeNewEmbeddings(selectedProject.id, useGlobal);
+        await handleRefreshView();
+      } catch (error) {
+        console.error('Failed to update global context:', error);
+      }
     }
   };
 
@@ -185,6 +228,11 @@ function App() {
                     projectId={selectedProject.id}
                     useNewEmbeddings={useNewEmbeddings}
                     onToggleEmbeddings={handleToggleEmbeddings}
+                    useGlobalContext={useGlobalContext}
+                    onToggleGlobalContext={handleToggleGlobalContext}
+                    automaticRefresh={automaticRefresh}
+                    onToggleAutomaticRefresh={setAutomaticRefresh}
+                    onRefreshView={handleRefreshView}
                   />
                   {/* Floating Papers Sidebar */}
                   <PapersSidebar
