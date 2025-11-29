@@ -139,6 +139,7 @@ const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialN
                     isOpen={showSimilarity}
                     onClose={() => setShowSimilarity(false)}
                     noteId={initialNote.id}
+                    noteColor={color}
                     onViewNode={(node) => {
                         if (onViewNode) {
                             onViewNode(node);

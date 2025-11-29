@@ -1020,7 +1020,7 @@ def delete_note(note_id: int):
     return {"message": "Note deleted successfully"}
 
 @app.get("/notes/{note_id}/similar", response_model=List[dict])
-def get_similar_nodes(note_id: int, limit: int = 5):
+def get_similar_nodes(note_id: int, limit: int = 20):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     

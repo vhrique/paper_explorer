@@ -7,10 +7,11 @@ interface SimilarityModalProps {
     isOpen: boolean;
     onClose: () => void;
     noteId: number;
+    noteColor: string;
     onViewNode: (node: Node) => void;
 }
 
-export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, onViewNode }) => {
+export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, noteColor, onViewNode }) => {
     const [loading, setLoading] = useState(false);
     const [nodes, setNodes] = useState<Node[]>([]);
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
@@ -129,8 +130,11 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
 
     return (
         <div className="absolute inset-0 bg-black bg-opacity-10 flex items-center justify-center z-[60]">
-            <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl h-[85%] flex flex-col">
-                <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+            <div
+                className="rounded-lg shadow-xl w-full max-w-2xl h-[85%] flex flex-col"
+                style={{ backgroundColor: noteColor }}
+            >
+                <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-white bg-opacity-50">
                     <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
                         <LinkIcon size={20} />
                         Similar Content
@@ -140,7 +144,7 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                     </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
+                <div className="flex-1 overflow-y-auto p-4 bg-white bg-opacity-30">
                     {loading ? (
                         <div className="flex justify-center items-center h-full">
                             <Loader2 className="animate-spin text-blue-600" size={32} />
@@ -153,15 +157,18 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                         <div className="space-y-3">
                             {nodes.map(node => {
                                 const isLinked = linkedNodeIds.has(node.id);
+                                const isSelected = selectedNodes.has(node.id);
+
+                                // Determine border color style
+                                const borderStyle = isSelected
+                                    ? { borderColor: '#3B82F6', borderWidth: '2px' } // Blue for selected
+                                    : { borderColor: node.paper_color || '#E5E7EB', borderWidth: '2px' }; // Paper color for others
+
                                 return (
                                     <div
                                         key={node.id}
-                                        className={`bg-white p-4 rounded-lg border transition-all ${selectedNodes.has(node.id)
-                                            ? 'border-blue-500 ring-1 ring-blue-500'
-                                            : isLinked
-                                                ? 'border-green-500 bg-green-50'
-                                                : 'border-gray-200 hover:border-blue-300'
-                                            }`}
+                                        className="bg-white p-4 rounded-lg transition-all"
+                                        style={borderStyle}
                                     >
                                         <div className="flex items-start gap-3">
                                             <div className="pt-1">
@@ -195,14 +202,14 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                     )}
                 </div>
 
-                <div className="p-4 border-t border-gray-200 bg-white flex justify-between items-center">
+                <div className="p-4 border-t border-gray-200 bg-white bg-opacity-50 flex justify-between items-center">
                     <span className="text-sm text-gray-600">
                         {selectedNodes.size} selected
                     </span>
                     <div className="flex gap-3">
                         <button
                             onClick={onClose}
-                            className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-md"
+                            className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-md bg-white bg-opacity-50"
                         >
                             Close
                         </button>
