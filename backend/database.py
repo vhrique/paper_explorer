@@ -64,6 +64,17 @@ def init_db():
             ''')
 
             cursor.execute('''
+            CREATE TABLE IF NOT EXISTS links (
+                id SERIAL PRIMARY KEY,
+                source_node_id TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                type TEXT DEFAULT 'manual',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (source_node_id, target_node_id)
+            )
+            ''')
+
+            cursor.execute('''
             CREATE TABLE IF NOT EXISTS notes (
                 id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
@@ -75,6 +86,9 @@ def init_db():
                 FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
             )
             ''')
+            
+            # Commit table creation before running migrations
+            conn.commit()
             
             # Add description column if it doesn't exist (migration)
             try:

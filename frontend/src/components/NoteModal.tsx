@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import type { Note } from '../api';
+import type { Note, Node } from '../api';
+import { SimilarityModal } from './SimilarityModal';
+import { Search } from 'lucide-react';
 
 interface NoteModalProps {
     isOpen: boolean;
     onClose: () => void;
     onSave: (title: string, content: string, color: string) => Promise<void>;
     initialNote?: Note | null;
+    onViewNode?: (node: Node) => void;
 }
 
 const COLORS = [
@@ -17,11 +20,12 @@ const COLORS = [
     "#FBCFE8", // Pink
 ];
 
-const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialNote }) => {
+const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialNote, onViewNode }) => {
     const [title, setTitle] = useState('');
     const [content, setContent] = useState('');
     const [color, setColor] = useState(COLORS[0]);
     const [isSaving, setIsSaving] = useState(false);
+    const [showSimilarity, setShowSimilarity] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -54,7 +58,7 @@ const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialN
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="absolute inset-0 bg-black bg-opacity-10 flex items-center justify-center z-50">
             <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6" style={{ backgroundColor: color }}>
                 <h2 className="text-xl font-bold mb-4 text-gray-800">
                     {initialNote ? 'Edit Note' : 'New Note'}
@@ -99,23 +103,50 @@ const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialN
                     </div>
                 </div>
 
-                <div className="mt-6 flex justify-end space-x-3">
-                    <button
-                        onClick={onClose}
-                        className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-md transition-colors"
-                        disabled={isSaving}
-                    >
-                        Cancel
-                    </button>
-                    <button
-                        onClick={handleSave}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
-                        disabled={isSaving || !content.trim()}
-                    >
-                        {isSaving ? 'Saving...' : 'Save'}
-                    </button>
+                <div className="mt-6 flex justify-between items-center">
+                    <div>
+                        {initialNote && (
+                            <button
+                                onClick={() => setShowSimilarity(true)}
+                                className="px-3 py-2 text-blue-600 hover:bg-blue-50 rounded-md transition-colors flex items-center gap-2 text-sm font-medium"
+                            >
+                                <Search size={16} />
+                                Find Similar
+                            </button>
+                        )}
+                    </div>
+                    <div className="flex space-x-3">
+                        <button
+                            onClick={onClose}
+                            className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-md transition-colors"
+                            disabled={isSaving}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleSave}
+                            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+                            disabled={isSaving || !content.trim()}
+                        >
+                            {isSaving ? 'Saving...' : 'Save'}
+                        </button>
+                    </div>
                 </div>
             </div>
+
+            {initialNote && (
+                <SimilarityModal
+                    isOpen={showSimilarity}
+                    onClose={() => setShowSimilarity(false)}
+                    noteId={initialNote.id}
+                    onViewNode={(node) => {
+                        if (onViewNode) {
+                            onViewNode(node);
+                            // Don't close modals to allow continuous browsing
+                        }
+                    }}
+                />
+            )}
         </div>
     );
 };
