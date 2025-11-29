@@ -88,7 +88,7 @@ class EmbeddingService:
         # 3. Train probabilistic SVM
         # -----------------------------
         clf = OneVsRestClassifier(
-            SVC(kernel="linear", class_weight="balanced", probability=True)
+            SVC(kernel="rbf", class_weight="balanced", probability=True)
         )
         clf.fit(X_train, Y_train)
 
