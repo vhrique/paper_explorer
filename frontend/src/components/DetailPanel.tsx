@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, FileText, Image as ImageIcon } from 'lucide-react';
-import { Node, api, Tag } from '../api';
+import { api } from '../api';
+import type { Node, Tag } from '../api';
 
 interface DetailPanelProps {
     node: Node | null;
@@ -51,7 +52,7 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({ node, onClose }) => {
         <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-2xl border-l border-gray-200 p-6 overflow-y-auto z-50 transform transition-transform duration-300 ease-in-out">
             <div className="flex justify-between items-start mb-6">
                 <div className="flex items-center gap-2 text-gray-500">
-                    {node.type === 'text' ? <FileText size={20} /> : <ImageIcon size={20} />}
+                    {node.type === 'text' ? <FileText size={20} /> : node.type === 'note' ? <FileText size={20} className="text-yellow-600" /> : <ImageIcon size={20} />}
                     <span className="text-sm font-medium uppercase tracking-wider">{node.type} Node</span>
                 </div>
                 <button
@@ -143,6 +144,11 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({ node, onClose }) => {
                     <p className="text-gray-800 leading-relaxed whitespace-pre-wrap">
                         {node.content}
                     </p>
+                ) : node.type === 'note' ? (
+                    <div className="bg-yellow-50 p-4 rounded-lg border border-yellow-200">
+                        <h4 className="font-bold text-gray-800 mb-2">{node.title || 'Untitled Note'}</h4>
+                        <p className="text-gray-800 whitespace-pre-wrap">{node.content}</p>
+                    </div>
                 ) : (
                     <div className="rounded-lg overflow-hidden border border-gray-200">
                         <img

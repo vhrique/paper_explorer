@@ -318,6 +318,17 @@ function App() {
                     projectId={selectedProject.id}
                     onNodeClick={handleNodeClick}
                   />
+
+                  <NoteModal
+                    isOpen={isNoteModalOpen}
+                    onClose={() => {
+                      setIsNoteModalOpen(false);
+                      setEditingNote(null);
+                    }}
+                    onSave={handleSaveNote}
+                    initialNote={editingNote}
+                    onViewNode={handleNodeClick}
+                  />
                 </div>
               </div>
 
@@ -340,15 +351,6 @@ function App() {
         )}
       </main>
 
-      <NoteModal
-        isOpen={isNoteModalOpen}
-        onClose={() => {
-          setIsNoteModalOpen(false);
-          setEditingNote(null);
-        }}
-        onSave={handleSaveNote}
-        initialNote={editingNote}
-      />
     </div>
   );
 }

@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, NoteCreate, NoteUpdate
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, NoteCreate, NoteUpdate, Link, LinkCreate
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -1018,3 +1018,108 @@ def delete_note(note_id: int):
         print(f"Error deleting note from ChromaDB: {e}")
         
     return {"message": "Note deleted successfully"}
+
+@app.get("/notes/{note_id}/similar", response_model=List[dict])
+def get_similar_nodes(note_id: int, limit: int = 5):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get note content and project_id
+    cursor.execute("SELECT content, project_id FROM notes WHERE id = %s", (note_id,))
+    note = cursor.fetchone()
+    conn.close()
+    
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+        
+    project_id = note['project_id']
+    
+    # Generate embedding for note content
+    embedding = embedding_service.generate_text_embedding(note['content'])
+    
+    # Query ChromaDB
+    collection = get_chroma_collection(project_id)
+    
+    # We want to find similar nodes, excluding the note itself
+    chroma_note_id = f"note_{note_id}"
+    
+    results = collection.query(
+        query_embeddings=[embedding],
+        n_results=limit + 1, # Fetch one extra in case the note itself is returned
+        include=["metadatas", "documents", "distances"]
+    )
+    
+    similar_nodes = []
+    if results['ids']:
+        ids = results['ids'][0]
+        metadatas = results['metadatas'][0]
+        documents = results['documents'][0]
+        distances = results['distances'][0]
+        
+        for i, id in enumerate(ids):
+            if id == chroma_note_id:
+                continue
+                
+            metadata = metadatas[i]
+            
+            # Construct node object
+            node = {
+                "id": id,
+                "type": metadata.get("type", "text"),
+                "content": documents[i],
+                "page_number": metadata.get("page_number"),
+                "paper_id": metadata.get("paper_id"),
+                "paper_color": metadata.get("paper_color"),
+                "bbox": eval(metadata.get("bbox", "[]")),
+                "distance": distances[i],
+                "title": metadata.get("title")
+            }
+            
+            # If image, sign URL
+            if node["type"] == "image":
+                node["content"] = storage_service.get_presigned_url(metadata.get("content"))
+                
+            similar_nodes.append(node)
+            
+    return similar_nodes[:limit]
+
+@app.post("/links/", response_model=Link)
+def create_link(link: LinkCreate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    try:
+        cursor.execute(
+            "INSERT INTO links (source_node_id, target_node_id, type) VALUES (%s, %s, %s) RETURNING *",
+            (link.source_node_id, link.target_node_id, link.type)
+        )
+        new_link = cursor.fetchone()
+        conn.commit()
+        return dict(new_link)
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        # If link already exists, just return it
+        cursor.execute(
+            "SELECT * FROM links WHERE source_node_id = %s AND target_node_id = %s",
+            (link.source_node_id, link.target_node_id)
+        )
+        existing_link = cursor.fetchone()
+        return dict(existing_link)
+    finally:
+        conn.close()
+
+@app.get("/links/{node_id}", response_model=List[Link])
+def get_node_links(node_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Get links where node is source OR target
+    cursor.execute("""
+        SELECT * FROM links 
+        WHERE source_node_id = %s OR target_node_id = %s
+        ORDER BY created_at DESC
+    """, (node_id, node_id))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]

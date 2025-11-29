@@ -110,3 +110,18 @@ class Note(NoteBase):
 
     class Config:
         from_attributes = True
+
+class LinkBase(BaseModel):
+    source_node_id: str
+    target_node_id: str
+    type: Optional[str] = "manual"
+
+class LinkCreate(LinkBase):
+    pass
+
+class Link(LinkBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -194,5 +194,20 @@ export const api = {
 
     deleteNote: async (noteId: number): Promise<void> => {
         await axios.delete(`${API_URL}/notes/${noteId}`);
+    },
+
+    // Similarity and Linking API
+    getSimilarNodes: async (noteId: number): Promise<Node[]> => {
+        const response = await axios.get(`${API_URL}/notes/${noteId}/similar`);
+        return response.data;
+    },
+
+    createLink: async (sourceNodeId: string, targetNodeId: string): Promise<void> => {
+        await axios.post(`${API_URL}/links/`, { source_node_id: sourceNodeId, target_node_id: targetNodeId });
+    },
+
+    getLinks: async (nodeId: string): Promise<any[]> => {
+        const response = await axios.get(`${API_URL}/links/${nodeId}`);
+        return response.data;
     }
 };
