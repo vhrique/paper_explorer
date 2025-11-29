@@ -1123,3 +1123,31 @@ def get_node_links(node_id: str):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+@app.delete("/links/")
+def delete_link(source_node_id: str, target_node_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Delete link regardless of direction (or check both directions)
+        # Since our unique constraint is (source, target), we should be careful.
+        # But usually we want to remove the connection.
+        # Let's try to delete both directions just in case, or specific one.
+        # For now, let's delete the specific direction requested.
+        cursor.execute(
+            "DELETE FROM links WHERE source_node_id = %s AND target_node_id = %s",
+            (source_node_id, target_node_id)
+        )
+        
+        # Also try the reverse direction if we want bidirectional deletion?
+        # For now let's stick to explicit deletion.
+        
+        conn.commit()
+        return {"message": "Link deleted successfully"}
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting link: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete link")
+    finally:
+        conn.close()

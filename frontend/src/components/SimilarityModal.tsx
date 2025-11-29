@@ -55,8 +55,6 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
     };
 
     const handleToggleSelect = (nodeId: string) => {
-        if (linkedNodeIds.has(nodeId)) return; // Prevent selecting already linked nodes
-
         const newSelected = new Set(selectedNodes);
         if (newSelected.has(nodeId)) {
             newSelected.delete(nodeId);
@@ -67,22 +65,26 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
     };
 
     const handleLink = async () => {
-        if (selectedNodes.size === 0) return;
+        const nodesToLink = Array.from(selectedNodes).filter(id => !linkedNodeIds.has(id));
+        if (nodesToLink.length === 0) return;
 
         setLinking(true);
         try {
-            const promises = Array.from(selectedNodes).map(targetId =>
+            const promises = nodesToLink.map(targetId =>
                 api.createLink(`note_${noteId}`, targetId)
             );
             await Promise.all(promises);
 
             // Update local state
             const newLinked = new Set(linkedNodeIds);
-            selectedNodes.forEach(id => newLinked.add(id));
+            nodesToLink.forEach(id => newLinked.add(id));
             setLinkedNodeIds(newLinked);
-            setSelectedNodes(new Set());
 
-            // alert('Links created successfully!'); // Removed alert for smoother UX
+            // Deselect linked nodes
+            const newSelected = new Set(selectedNodes);
+            nodesToLink.forEach(id => newSelected.delete(id));
+            setSelectedNodes(newSelected);
+
         } catch (error) {
             console.error("Failed to create links:", error);
             alert('Failed to create links.');
@@ -90,6 +92,38 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
             setLinking(false);
         }
     };
+
+    const handleUnlink = async () => {
+        const nodesToUnlink = Array.from(selectedNodes).filter(id => linkedNodeIds.has(id));
+        if (nodesToUnlink.length === 0) return;
+
+        setLinking(true);
+        try {
+            const promises = nodesToUnlink.map(targetId =>
+                api.deleteLink(`note_${noteId}`, targetId)
+            );
+            await Promise.all(promises);
+
+            // Update local state
+            const newLinked = new Set(linkedNodeIds);
+            nodesToUnlink.forEach(id => newLinked.delete(id));
+            setLinkedNodeIds(newLinked);
+
+            // Deselect unlinked nodes
+            const newSelected = new Set(selectedNodes);
+            nodesToUnlink.forEach(id => newSelected.delete(id));
+            setSelectedNodes(newSelected);
+
+        } catch (error) {
+            console.error("Failed to remove links:", error);
+            alert('Failed to remove links.');
+        } finally {
+            setLinking(false);
+        }
+    };
+
+    const selectedUnlinkedCount = Array.from(selectedNodes).filter(id => !linkedNodeIds.has(id)).length;
+    const selectedLinkedCount = Array.from(selectedNodes).filter(id => linkedNodeIds.has(id)).length;
 
     if (!isOpen) return null;
 
@@ -122,27 +156,21 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                                 return (
                                     <div
                                         key={node.id}
-                                        className={`bg-white p-4 rounded-lg border transition-all ${isLinked
+                                        className={`bg-white p-4 rounded-lg border transition-all ${selectedNodes.has(node.id)
+                                            ? 'border-blue-500 ring-1 ring-blue-500'
+                                            : isLinked
                                                 ? 'border-green-500 bg-green-50'
-                                                : selectedNodes.has(node.id)
-                                                    ? 'border-blue-500 ring-1 ring-blue-500'
-                                                    : 'border-gray-200 hover:border-blue-300'
+                                                : 'border-gray-200 hover:border-blue-300'
                                             }`}
                                     >
                                         <div className="flex items-start gap-3">
                                             <div className="pt-1">
-                                                {isLinked ? (
-                                                    <div className="text-green-600">
-                                                        <LinkIcon size={16} />
-                                                    </div>
-                                                ) : (
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selectedNodes.has(node.id)}
-                                                        onChange={() => handleToggleSelect(node.id)}
-                                                        className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                                                    />
-                                                )}
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedNodes.has(node.id)}
+                                                    onChange={() => handleToggleSelect(node.id)}
+                                                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                                                />
                                             </div>
                                             <div className="flex-1 cursor-pointer" onClick={() => onViewNode(node)}>
                                                 <div className="flex items-center gap-2 mb-1">
@@ -178,13 +206,26 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                         >
                             Close
                         </button>
-                        <button
-                            onClick={handleLink}
-                            disabled={selectedNodes.size === 0 || linking}
-                            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-                        >
-                            {linking ? 'Linking...' : 'Link Selected'}
-                        </button>
+
+                        {selectedLinkedCount > 0 && (
+                            <button
+                                onClick={handleUnlink}
+                                disabled={linking}
+                                className="px-4 py-2 bg-red-100 text-red-700 rounded-md hover:bg-red-200 disabled:opacity-50 flex items-center gap-2"
+                            >
+                                {linking ? 'Updating...' : `Unlink (${selectedLinkedCount})`}
+                            </button>
+                        )}
+
+                        {selectedUnlinkedCount > 0 && (
+                            <button
+                                onClick={handleLink}
+                                disabled={linking}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                            >
+                                {linking ? 'Updating...' : `Link (${selectedUnlinkedCount})`}
+                            </button>
+                        )}
                     </div>
                 </div>
             </div>

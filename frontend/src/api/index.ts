@@ -209,5 +209,11 @@ export const api = {
     getLinks: async (nodeId: string): Promise<any[]> => {
         const response = await axios.get(`${API_URL}/links/${nodeId}`);
         return response.data;
+    },
+
+    deleteLink: async (sourceNodeId: string, targetNodeId: string): Promise<void> => {
+        await axios.delete(`${API_URL}/links/`, {
+            params: { source_node_id: sourceNodeId, target_node_id: targetNodeId }
+        });
     }
 };
