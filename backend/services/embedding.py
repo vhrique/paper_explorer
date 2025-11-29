@@ -30,7 +30,7 @@ class EmbeddingService:
         Enriches nodes with embeddings.
         """
         for node in nodes:
-            if node["type"] == "text":
+            if node["type"] == "text" or node["type"] == 'note':
                 node["embedding"] = self.generate_text_embedding(node["content"])
             elif node["type"] == "image":
                 full_path = os.path.join(base_path, node["content"])

@@ -63,9 +63,48 @@ const ImageNode = ({ data }: any) => {
     );
 };
 
+const NoteNode = ({ data }: any) => {
+    const bgColor = data.original?.paper_color || '#FEF3C7';
+    const hasTags = data.original?.has_tags || false;
+    const title = data.original?.title;
+
+    return (
+        <div
+            className="shadow-lg rounded-sm p-4 w-48 h-48 relative flex flex-col transform hover:scale-105 transition-transform"
+            style={{
+                backgroundColor: bgColor,
+                boxShadow: '2px 2px 5px rgba(0,0,0,0.1)'
+            }}
+        >
+            <Handle type="target" position={Position.Top} className="w-16 opacity-0" />
+
+            {hasTags && (
+                <div className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center" title="Has tags">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
+                        <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                    </svg>
+                </div>
+            )}
+
+            {title && (
+                <div className="font-bold text-gray-800 mb-2 truncate border-b border-black/10 pb-1">
+                    {title}
+                </div>
+            )}
+
+            <div className="text-sm text-gray-700 font-handwriting flex-1 overflow-hidden font-medium" style={{ fontFamily: '"Comic Sans MS", "Chalkboard SE", sans-serif' }}>
+                {data.content}
+            </div>
+
+            <Handle type="source" position={Position.Bottom} className="w-16 opacity-0" />
+        </div>
+    );
+};
+
 const nodeTypes: NodeTypes = {
     text: TextNode,
     image: ImageNode,
+    note: NoteNode,
 };
 
 interface GraphViewProps {

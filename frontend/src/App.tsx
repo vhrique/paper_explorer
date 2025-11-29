@@ -5,9 +5,10 @@ import { PapersSidebar } from './components/PapersSidebar';
 import { PDFViewer } from './components/PDFViewer';
 import { AdvancedViewPanel } from './components/AdvancedViewPanel';
 import { TagsPanel } from './components/TagsPanel';
+import NoteModal from './components/NoteModal';
 
 import { api } from './api';
-import type { Project, GraphData, Node } from './api';
+import type { Project, GraphData, Node, Note } from './api';
 import { ArrowLeft, Network } from 'lucide-react';
 
 type View = 'projects' | 'graph';
@@ -20,6 +21,11 @@ function App() {
   const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
   const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+
+  // Note State
+  const [isNoteModalOpen, setIsNoteModalOpen] = useState(false);
+  const [editingNote, setEditingNote] = useState<Note | null>(null);
+  const [sidebarRefreshTrigger, setSidebarRefreshTrigger] = useState(0);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
@@ -70,12 +76,31 @@ function App() {
 
   const handleNodeClick = (node: any) => {
     console.log('Node clicked:', node);
-    // The node object from React Flow puts the original data in node.data.original
-    // But our GraphView passes the API node directly to onNodeClick
-    // Let's check what we get.
-    // In GraphView.tsx: onNodeClick(node.data.original)
-    // So we get the raw API Node object.
-    setSelectedNode(node);
+
+    if (node.type === 'note') {
+      // Map API node to Note object for editing
+      // The node from graph has: id, type, content, paper_color, etc.
+      // We need to construct a Note-like object or fetch the full note.
+      // Since we have the content and color in the node, we can use that.
+      // But we need the numeric ID for updates.
+      // The node ID in graph is "note_{id}".
+      const noteId = parseInt(node.id.replace('note_', ''));
+
+      const noteForEdit: Note = {
+        id: noteId,
+        project_id: selectedProject?.id || 0,
+        title: node.title,
+        content: node.content,
+        color: node.paper_color || '#FEF3C7',
+        created_at: '', // Not needed for edit
+        updated_at: ''
+      };
+
+      setEditingNote(noteForEdit);
+      setIsNoteModalOpen(true);
+    } else {
+      setSelectedNode(node);
+    }
   };
 
   const handleTagsUpdated = async () => {
@@ -161,6 +186,38 @@ function App() {
     }
   };
 
+  // Note Handlers
+  const handleSaveNote = async (title: string, content: string, color: string) => {
+    if (!selectedProject) return;
+
+    try {
+      if (editingNote) {
+        await api.updateNote(editingNote.id, { title, content, color });
+      } else {
+        await api.createNote(selectedProject.id, title, content, color);
+      }
+
+      // Refresh everything
+      setSidebarRefreshTrigger(prev => prev + 1);
+      await handleRefreshView();
+
+    } catch (error) {
+      console.error('Failed to save note:', error);
+      alert('Failed to save note. Please try again.');
+      throw error;
+    }
+  };
+
+  const handleAddNote = () => {
+    setEditingNote(null);
+    setIsNoteModalOpen(true);
+  };
+
+  const handleEditNote = (note: Note) => {
+    setEditingNote(note);
+    setIsNoteModalOpen(true);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
       {/* Header */}
@@ -238,6 +295,9 @@ function App() {
                   <PapersSidebar
                     projectId={selectedProject.id}
                     onUploadComplete={handleUploadComplete}
+                    onEditNote={handleEditNote}
+                    onAddNote={handleAddNote}
+                    refreshTrigger={sidebarRefreshTrigger}
                   />
                   {/* Floating Tags Panel */}
                   <TagsPanel
@@ -266,6 +326,16 @@ function App() {
           </div>
         )}
       </main>
+
+      <NoteModal
+        isOpen={isNoteModalOpen}
+        onClose={() => {
+          setIsNoteModalOpen(false);
+          setEditingNote(null);
+        }}
+        onSave={handleSaveNote}
+        initialNote={editingNote}
+      />
     </div>
   );
 }
