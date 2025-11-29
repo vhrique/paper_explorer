@@ -46,6 +46,12 @@ function App() {
 
     console.log('Refreshing graph after paper deletion/upload...');
     try {
+      // If useNewEmbeddings is enabled, recompute embeddings first
+      if (useNewEmbeddings) {
+        console.log('Recomputing new embeddings after paper upload...');
+        await api.computeNewEmbeddings(selectedProject.id, useGlobalContext);
+      }
+
       const data = await api.getGraph(selectedProject.id, useNewEmbeddings);
       console.log(`Received graph data: ${data.nodes.length} nodes, ${data.edges.length} edges`);
       setGraphData(data);
@@ -199,6 +205,13 @@ function App() {
 
       // Refresh everything
       setSidebarRefreshTrigger(prev => prev + 1);
+
+      // If useNewEmbeddings is enabled, recompute embeddings first
+      if (useNewEmbeddings) {
+        console.log('Recomputing new embeddings after note save...');
+        await api.computeNewEmbeddings(selectedProject.id, useGlobalContext);
+      }
+
       await handleRefreshView();
 
     } catch (error) {
