@@ -88,3 +88,25 @@ class ComputeEmbeddingsResponse(BaseModel):
     status: str
     message: str
     nodes_processed: int
+
+class NoteBase(BaseModel):
+    title: Optional[str] = None
+    content: str
+    color: Optional[str] = "#FEF3C7" # Default sticky note yellow
+
+class NoteCreate(NoteBase):
+    project_id: int
+
+class NoteUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    color: Optional[str] = None
+
+class Note(NoteBase):
+    id: int
+    project_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

@@ -20,9 +20,19 @@ export interface Paper {
     created_at: string;
 }
 
+export interface Note {
+    id: number;
+    project_id: number;
+    title?: string;
+    content: string;
+    color: string;
+    created_at: string;
+    updated_at: string;
+}
+
 export interface Node {
     id: string;
-    type: 'text' | 'image';
+    type: 'text' | 'image' | 'note';
     content: string;
     page_number: number;
     bbox: number[];
@@ -30,6 +40,8 @@ export interface Node {
     paper_color?: string;
     position?: { x: number; y: number };  // PCA-based position from backend
     has_tags?: boolean;  // Whether this node has any tags
+    note_id?: string; // ID of the note if type is 'note'
+    title?: string; // Title for note
 }
 
 export interface Edge {
@@ -162,5 +174,25 @@ export const api = {
     getTagNodes: async (projectId: number, tagId: number): Promise<any[]> => {
         const response = await axios.get(`${API_URL}/projects/${projectId}/tags/${tagId}/nodes`);
         return response.data;
+    },
+
+    // Note API
+    createNote: async (projectId: number, title: string, content: string, color: string): Promise<Note> => {
+        const response = await axios.post(`${API_URL}/projects/${projectId}/notes/`, { project_id: projectId, title, content, color });
+        return response.data;
+    },
+
+    listNotes: async (projectId: number): Promise<Note[]> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/notes/`);
+        return response.data;
+    },
+
+    updateNote: async (noteId: number, updates: { title?: string; content?: string; color?: string }): Promise<Note> => {
+        const response = await axios.patch(`${API_URL}/notes/${noteId}`, updates);
+        return response.data;
+    },
+
+    deleteNote: async (noteId: number): Promise<void> => {
+        await axios.delete(`${API_URL}/notes/${noteId}`);
     }
 };

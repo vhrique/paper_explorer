@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate
+from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, NoteCreate, NoteUpdate
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
@@ -389,7 +389,9 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
                 "paper_color": metadata.get("paper_color", "#3B82F6"),  # Default color if not found
                 "bbox": eval(metadata["bbox"]), # Unsafe but quick for now
                 "embedding": result["embeddings"][i],
-                "has_tags": id in tagged_node_ids  # Add tag indicator
+                "has_tags": id in tagged_node_ids,  # Add tag indicator
+                "title": metadata.get("title"),
+                "note_id": metadata.get("note_id")
             }
             
             # Check if new_embedding exists in metadata
@@ -854,3 +856,165 @@ def compute_new_embeddings(project_id: int, use_global_context: bool = False):
         message=f"Successfully computed new embeddings for {len(nodes_with_new)} nodes",
         nodes_processed=len(nodes_with_new)
     )
+
+@app.post("/projects/{project_id}/notes/", response_model=Note)
+def create_note(project_id: int, note: NoteCreate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # 1. Create Note in DB
+    cursor.execute(
+        "INSERT INTO notes (project_id, title, content, color) VALUES (%s, %s, %s, %s) RETURNING *",
+        (project_id, note.title, note.content, note.color)
+    )
+    new_note = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    # 2. Generate Embedding
+    embedding = embedding_service.generate_text_embedding(note.content)
+    
+    # 3. Save to ChromaDB
+    collection = get_chroma_collection(project_id)
+    
+    note_id = str(new_note['id'])
+    # Prefix with 'note_' to avoid collision with other IDs if necessary, 
+    # but since other IDs are UUIDs or hashes, simple int ID might collide if not careful.
+    # Actually paper nodes use UUIDs generated in pdf_processor.
+    # Let's use "note_{id}" as the ID in ChromaDB to be safe and distinct.
+    chroma_id = f"note_{note_id}"
+    
+    collection.add(
+        ids=[chroma_id],
+        embeddings=[embedding],
+        metadatas=[{
+            "type": "note",
+            "title": note.title or "",
+            "content": note.content,
+            "paper_id": -1, # Notes don't belong to a paper
+            "paper_color": note.color,
+            "note_id": note_id,
+            "bbox": "[]",
+            "page_number": 0
+        }],
+        documents=[note.content]
+    )
+    
+    return dict(new_note)
+
+@app.get("/projects/{project_id}/notes/", response_model=List[Note])
+def list_notes(project_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT * FROM notes WHERE project_id = %s ORDER BY created_at DESC", (project_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+@app.patch("/notes/{note_id}", response_model=Note)
+def update_note(note_id: int, note_update: NoteUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Check if note exists
+    cursor.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
+    existing_note = cursor.fetchone()
+    
+    if not existing_note:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Note not found")
+    
+    # Build update query
+    update_fields = []
+    params = []
+    
+    if note_update.title is not None:
+        update_fields.append("title = %s")
+        params.append(note_update.title)
+        
+    if note_update.content is not None:
+        update_fields.append("content = %s")
+        params.append(note_update.content)
+        
+    if note_update.color is not None:
+        update_fields.append("color = %s")
+        params.append(note_update.color)
+        
+    update_fields.append("updated_at = CURRENT_TIMESTAMP")
+        
+    if not update_fields:
+        conn.close()
+        return dict(existing_note)
+        
+    params.append(note_id)
+    query = f"UPDATE notes SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
+    
+    cursor.execute(query, tuple(params))
+    updated_note = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    # Update ChromaDB if content or color changed
+    if note_update.content is not None or note_update.color is not None or note_update.title is not None:
+        try:
+            collection = get_chroma_collection(existing_note['project_id'])
+            chroma_id = f"note_{note_id}"
+            
+            # Fetch existing metadata
+            result = collection.get(ids=[chroma_id])
+            if result['ids']:
+                metadata = result['metadatas'][0]
+                
+                # Update metadata
+                if note_update.color is not None:
+                    metadata['paper_color'] = note_update.color
+                if note_update.title is not None:
+                    metadata['title'] = note_update.title
+                if note_update.content is not None:
+                    metadata['content'] = note_update.content
+                    
+                # Update embedding if content changed
+                embeddings = None
+                documents = None
+                if note_update.content is not None:
+                    embeddings = [embedding_service.generate_text_embedding(note_update.content)]
+                    documents = [note_update.content]
+                
+                collection.update(
+                    ids=[chroma_id],
+                    embeddings=embeddings,
+                    metadatas=[metadata],
+                    documents=documents
+                )
+        except Exception as e:
+            print(f"Error updating ChromaDB for note: {e}")
+            
+    return dict(updated_note)
+
+@app.delete("/notes/{note_id}")
+def delete_note(note_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    cursor.execute("SELECT project_id FROM notes WHERE id = %s", (note_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Note not found")
+        
+    project_id = row['project_id']
+    
+    cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+    conn.commit()
+    conn.close()
+    
+    # Delete from ChromaDB
+    try:
+        collection = get_chroma_collection(project_id)
+        chroma_id = f"note_{note_id}"
+        collection.delete(ids=[chroma_id])
+    except Exception as e:
+        print(f"Error deleting note from ChromaDB: {e}")
+        
+    return {"message": "Note deleted successfully"}

@@ -62,13 +62,32 @@ def init_db():
                 FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE
             )
             ''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notes (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                title TEXT,
+                content TEXT NOT NULL,
+                color TEXT DEFAULT '#FEF3C7',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+            )
+            ''')
             
             # Add description column if it doesn't exist (migration)
             try:
-                cursor.execute("ALTER TABLE papers ADD COLUMN IF NOT EXISTS description TEXT")
+                cursor.execute("ALTER TABLE papers ADD COLUMN description TEXT")
                 conn.commit()
-            except Exception as e:
-                print(f"Migration failed (description column): {e}")
+            except psycopg2.errors.DuplicateColumn:
+                conn.rollback()
+
+            # Add updated_at column to notes if it doesn't exist (migration)
+            try:
+                cursor.execute("ALTER TABLE notes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                conn.commit()
+            except psycopg2.errors.DuplicateColumn:
                 conn.rollback()
             
             conn.commit()
