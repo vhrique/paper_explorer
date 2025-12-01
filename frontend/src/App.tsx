@@ -352,6 +352,7 @@ function App() {
                     onSave={handleSaveNote}
                     initialNote={editingNote}
                     onViewNode={handleNodeClick}
+                    useNewEmbeddings={useNewEmbeddings}
                   />
                 </div>
               </div>

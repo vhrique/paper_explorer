@@ -15,6 +15,8 @@ from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
 from services.storage import S3StorageService
+from services.similarity import SimilarityService
+
 
 app = FastAPI(title="Paper Explorer API")
 
@@ -31,6 +33,7 @@ storage_service = S3StorageService()
 pdf_processor = PDFProcessor(storage_service)
 embedding_service = EmbeddingService()
 graph_service = GraphService()
+similarity_service = SimilarityService()
 
 @app.on_event("startup")
 def startup_event():
@@ -1033,7 +1036,7 @@ def delete_note(note_id: int):
     return {"message": "Note deleted successfully"}
 
 @app.get("/notes/{note_id}/similar", response_model=List[dict])
-def get_similar_nodes(note_id: int, limit: int = 20):
+def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = False):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
@@ -1047,54 +1050,94 @@ def get_similar_nodes(note_id: int, limit: int = 20):
         
     project_id = note['project_id']
     
-    # Generate embedding for note content
-    embedding = embedding_service.generate_text_embedding(note['content'])
-    
-    # Query ChromaDB
+    # Get the query embedding
     collection = get_chroma_collection(project_id)
-    
-    # We want to find similar nodes, excluding the note itself
     chroma_note_id = f"note_{note_id}"
     
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=limit + 1, # Fetch one extra in case the note itself is returned
-        include=["metadatas", "documents", "distances"]
+    # Fetch the note's embedding from ChromaDB
+    note_result = collection.get(ids=[chroma_note_id], include=["embeddings", "metadatas"])
+    
+    if not note_result['ids']:
+        raise HTTPException(status_code=404, detail="Note embedding not found")
+    
+    # Get query embedding based on mode
+    if use_new_embeddings:
+        # Try to get new_embedding from metadata
+        metadata = note_result['metadatas'][0]
+        new_emb_str = metadata.get('new_embedding')
+        
+        if not new_emb_str:
+            # Fall back to generating one on the fly or return error
+            raise HTTPException(
+                status_code=400, 
+                detail="New embeddings not computed. Please compute embeddings first in Advanced View."
+            )
+        
+        try:
+            import json
+            query_embedding = json.loads(new_emb_str)
+        except (json.JSONDecodeError, TypeError):
+            raise HTTPException(status_code=500, detail="Failed to parse new embedding")
+    else:
+        # Use original embedding
+        query_embedding = note_result['embeddings'][0]
+    
+    # Fetch all nodes from the collection
+    all_nodes_result = collection.get(include=["embeddings", "metadatas", "documents"])
+    
+    if not all_nodes_result['ids']:
+        return []
+    
+    # Prepare nodes for similarity service
+    nodes = []
+    for i, node_id in enumerate(all_nodes_result['ids']):
+        nodes.append({
+            'id': node_id,
+            'embedding': all_nodes_result['embeddings'][i],
+            'metadata': all_nodes_result['metadatas'][i],
+            'document': all_nodes_result['documents'][i]
+        })
+    
+    # Use similarity service to find similar nodes
+    similar_results = similarity_service.find_similar_nodes(
+        query_embedding=query_embedding,
+        nodes=nodes,
+        limit=limit + 1,  # +1 to account for the note itself
+        use_new_embeddings=use_new_embeddings
     )
     
+    # Build response
     similar_nodes = []
-    if results['ids']:
-        ids = results['ids'][0]
-        metadatas = results['metadatas'][0]
-        documents = results['documents'][0]
-        distances = results['distances'][0]
+    for node_id, similarity, metadata in similar_results:
+        # Skip the note itself
+        if node_id == chroma_note_id:
+            continue
         
-        for i, id in enumerate(ids):
-            if id == chroma_note_id:
-                continue
-                
-            metadata = metadatas[i]
+        # Construct node object
+        node = {
+            "id": node_id,
+            "type": metadata.get("type", "text"),
+            "content": metadata.get("content", ""),
+            "page_number": metadata.get("page_number"),
+            "paper_id": metadata.get("paper_id"),
+            "paper_color": metadata.get("paper_color"),
+            "bbox": eval(metadata.get("bbox", "[]")),
+            "similarity": similarity,
+            "title": metadata.get("title")
+        }
+        
+        # If image, generate presigned URL
+        if node["type"] == "image":
+            node["content"] = storage_service.get_presigned_url(metadata.get("content"))
             
-            # Construct node object
-            node = {
-                "id": id,
-                "type": metadata.get("type", "text"),
-                "content": documents[i],
-                "page_number": metadata.get("page_number"),
-                "paper_id": metadata.get("paper_id"),
-                "paper_color": metadata.get("paper_color"),
-                "bbox": eval(metadata.get("bbox", "[]")),
-                "distance": distances[i],
-                "title": metadata.get("title")
-            }
-            
-            # If image, sign URL
-            if node["type"] == "image":
-                node["content"] = storage_service.get_presigned_url(metadata.get("content"))
-                
-            similar_nodes.append(node)
-            
-    return similar_nodes[:limit]
+        similar_nodes.append(node)
+        
+        # Stop once we have enough results (excluding the note itself)
+        if len(similar_nodes) >= limit:
+            break
+    
+    return similar_nodes
+
 
 @app.post("/links/", response_model=Link)
 def create_link(link: LinkCreate):

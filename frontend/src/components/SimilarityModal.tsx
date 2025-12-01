@@ -9,9 +9,10 @@ interface SimilarityModalProps {
     noteId: number;
     noteColor: string;
     onViewNode: (node: Node) => void;
+    useNewEmbeddings?: boolean;
 }
 
-export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, noteColor, onViewNode }) => {
+export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, noteColor, onViewNode, useNewEmbeddings = false }) => {
     const [loading, setLoading] = useState(false);
     const [nodes, setNodes] = useState<Node[]>([]);
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
@@ -22,13 +23,13 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
         if (isOpen && noteId) {
             fetchData();
         }
-    }, [isOpen, noteId]);
+    }, [isOpen, noteId, useNewEmbeddings]);
 
     const fetchData = async () => {
         setLoading(true);
         try {
             const [similarNodes, links] = await Promise.all([
-                api.getSimilarNodes(noteId),
+                api.getSimilarNodes(noteId, useNewEmbeddings),
                 api.getLinks(`note_${noteId}`)
             ]);
             setNodes(similarNodes);
