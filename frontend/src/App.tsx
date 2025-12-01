@@ -231,6 +231,28 @@ function App() {
     setIsNoteModalOpen(true);
   };
 
+  const handleCreateLink = async (source: string, target: string) => {
+    if (!selectedProject) return;
+    try {
+      await api.createLink(source, target);
+      // Refresh graph to show new link
+      await handleRefreshView();
+    } catch (error) {
+      console.error('Failed to create link:', error);
+    }
+  };
+
+  const handleDeleteEdge = async (source: string, target: string) => {
+    if (!selectedProject) return;
+    try {
+      await api.deleteLink(source, target);
+      // Refresh graph to remove link
+      await handleRefreshView();
+    } catch (error) {
+      console.error('Failed to delete link:', error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
       {/* Header */}
@@ -292,6 +314,8 @@ function App() {
                     data={graphData}
                     onNodeClick={handleNodeClick}
                     selectedNodeId={selectedNodeId}
+                    onConnect={handleCreateLink}
+                    onDeleteEdge={handleDeleteEdge}
                   />
                   {/* Floating Advanced View Panel */}
                   <AdvancedViewPanel

@@ -8,7 +8,7 @@ import ReactFlow, {
     Handle,
     Position
 } from 'reactflow';
-import type { Node, Edge, NodeTypes } from 'reactflow';
+import type { Node, Edge, NodeTypes, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { Node as APINode, Edge as APIEdge } from '../api';
 
@@ -111,6 +111,8 @@ interface GraphViewProps {
     data: { nodes: APINode[], edges: APIEdge[] };
     onNodeClick: (node: APINode) => void;
     selectedNodeId?: string;  // Externally selected node (e.g., from PDF click)
+    onConnect?: (source: string, target: string) => void;
+    onDeleteEdge?: (source: string, target: string) => void;
 }
 
 // Helper to darken hex color
@@ -134,10 +136,41 @@ const darkenColor = (hex: string, percent: number) => {
     return "#" + rr + gg + bb;
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const reactFlowInstance = React.useRef<any>(null);
+    const [contextMenu, setContextMenu] = React.useState<{ id: string; source: string; target: string; x: number; y: number } | null>(null);
+
+    const onConnectCallback = useCallback((params: Connection) => {
+        if (onConnect && params.source && params.target) {
+            onConnect(params.source, params.target);
+        }
+    }, [onConnect]);
+
+    const onEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
+        event.preventDefault();
+        // Calculate position relative to the viewport or container?
+        // event.clientX/Y are global.
+        setContextMenu({
+            id: edge.id,
+            source: edge.source,
+            target: edge.target,
+            x: event.clientX,
+            y: event.clientY,
+        });
+    }, []);
+
+    const onPaneClick = useCallback(() => {
+        setContextMenu(null);
+    }, []);
+
+    const handleDeleteEdge = () => {
+        if (contextMenu && onDeleteEdge) {
+            onDeleteEdge(contextMenu.source, contextMenu.target);
+            setContextMenu(null);
+        }
+    };
 
     // Focus on selected node when selectedNodeId changes
     useEffect(() => {
@@ -270,6 +303,9 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onNodeClick={handleNodeClick}
+                onConnect={onConnectCallback}
+                onEdgeContextMenu={onEdgeContextMenu}
+                onPaneClick={onPaneClick}
                 nodeTypes={nodeTypes}
                 onInit={(instance) => { reactFlowInstance.current = instance; }}
                 fitView
@@ -280,6 +316,31 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                 <Background color="#e2e8f0" gap={16} />
                 <Controls />
             </ReactFlow>
+            {
+                contextMenu && (
+                    <div
+                        style={{
+                            position: 'fixed',
+                            top: contextMenu.y,
+                            left: contextMenu.x,
+                            zIndex: 1000,
+                        }}
+                        className="bg-white shadow-lg rounded-md border border-gray-200 py-1 min-w-[120px]"
+                    >
+                        <button
+                            className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+                            onClick={handleDeleteEdge}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M3 6h18"></path>
+                                <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                                <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                            </svg>
+                            Delete Link
+                        </button>
+                    </div>
+                )
+            }
         </div>
     );
 };

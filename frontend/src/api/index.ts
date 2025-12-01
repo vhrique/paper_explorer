@@ -202,8 +202,8 @@ export const api = {
         return response.data;
     },
 
-    createLink: async (sourceNodeId: string, targetNodeId: string): Promise<void> => {
-        await axios.post(`${API_URL}/links/`, { source_node_id: sourceNodeId, target_node_id: targetNodeId });
+    createLink: async (sourceNodeId: string, targetNodeId: string, type: string = 'manual'): Promise<void> => {
+        await axios.post(`${API_URL}/links/`, { source_node_id: sourceNodeId, target_node_id: targetNodeId, type });
     },
 
     getLinks: async (nodeId: string): Promise<any[]> => {

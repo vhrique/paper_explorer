@@ -18,11 +18,11 @@ class GraphService:
         # Convert to numpy array for PCA
         embeddings_array = np.array(embeddings) if embeddings else np.empty((0, 0))
         
-        # Use PCA to project embeddings to 2D for positioning
+        # Use TSNE to project embeddings to 2D for positioning
         # This places semantically similar content close together
         if len(embeddings) >= 2:
             n_components = min(2, len(embeddings))
-            tsne = TSNE(n_components=n_components).fit(embeddings_array)
+            tsne = TSNE(n_components=n_components, random_state=42, metric='cosine').fit(embeddings_array)
             positions_2d = tsne.transform(embeddings_array)
             
             # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
