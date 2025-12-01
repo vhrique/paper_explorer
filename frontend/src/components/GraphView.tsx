@@ -113,6 +113,27 @@ interface GraphViewProps {
     selectedNodeId?: string;  // Externally selected node (e.g., from PDF click)
 }
 
+// Helper to darken hex color
+const darkenColor = (hex: string, percent: number) => {
+    let r = parseInt(hex.substring(1, 3), 16);
+    let g = parseInt(hex.substring(3, 5), 16);
+    let b = parseInt(hex.substring(5, 7), 16);
+
+    r = Math.floor(r * (100 - percent) / 100);
+    g = Math.floor(g * (100 - percent) / 100);
+    b = Math.floor(b * (100 - percent) / 100);
+
+    r = (r < 255) ? r : 255;
+    g = (g < 255) ? g : 255;
+    b = (b < 255) ? b : 255;
+
+    const rr = ((r.toString(16).length === 1) ? "0" + r.toString(16) : r.toString(16));
+    const gg = ((g.toString(16).length === 1) ? "0" + g.toString(16) : g.toString(16));
+    const bb = ((b.toString(16).length === 1) ? "0" + b.toString(16) : b.toString(16));
+
+    return "#" + rr + gg + bb;
+};
+
 export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -171,22 +192,65 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
             },
         }));
 
-        const newEdges: Edge[] = data.edges.map((edge, index) => ({
-            id: `e-${index}`,
-            source: edge.source,
-            target: edge.target,
-            type: edge.type === 'sequence' ? 'default' : 'straight',
-            animated: edge.type === 'sequence',
-            style: {
-                stroke: edge.type === 'sequence' ? '#cbd5e1' : '#93c5fd',
-                strokeWidth: edge.type === 'sequence' ? 2 : Math.max(1, edge.weight * 5),
-                opacity: edge.type === 'sequence' ? 1 : 0.6
-            },
-            markerEnd: {
-                type: MarkerType.ArrowClosed,
-                color: edge.type === 'sequence' ? '#cbd5e1' : '#93c5fd',
-            },
-        }));
+        // Create a map for quick node lookup
+        const nodeMap = new Map<string, APINode>(data.nodes.map((n: APINode) => [n.id, n]));
+
+        const newEdges: Edge[] = data.edges.map((edge, index) => {
+            let edgeColor = '#93c5fd'; // Default similarity color (though unused now)
+            let strokeWidth = 1;
+            let opacity = 0.6;
+
+            if (edge.type === 'sequence') {
+                edgeColor = '#cbd5e1';
+                strokeWidth = 2;
+                opacity = 1;
+            } else if (edge.type === 'manual') {
+                // Find the color of the note involved in the link
+                const sourceNode = nodeMap.get(edge.source);
+                const targetNode = nodeMap.get(edge.target);
+
+                let baseColor = '#ef4444';
+                // Prioritize note color
+                if (sourceNode?.type === 'note') {
+                    baseColor = sourceNode.paper_color || '#ef4444';
+                } else if (targetNode?.type === 'note') {
+                    baseColor = targetNode.paper_color || '#ef4444';
+                } else {
+                    // Fallback to source color or default red
+                    baseColor = sourceNode?.paper_color || '#ef4444';
+                }
+
+                // Darken the color by 20% for better visibility
+                try {
+                    edgeColor = darkenColor(baseColor, 20);
+                } catch (e) {
+                    edgeColor = baseColor;
+                }
+
+                strokeWidth = 3; // Bolder
+                opacity = 1.0; // Fully opaque
+            } else {
+                // Similarity edges (if any remain)
+                strokeWidth = Math.max(1, edge.weight * 5);
+            }
+
+            return {
+                id: `e-${index}`,
+                source: edge.source,
+                target: edge.target,
+                type: edge.type === 'sequence' ? 'default' : 'straight',
+                animated: edge.type === 'sequence',
+                style: {
+                    stroke: edgeColor,
+                    strokeWidth: strokeWidth,
+                    opacity: opacity
+                },
+                markerEnd: {
+                    type: MarkerType.ArrowClosed,
+                    color: edgeColor,
+                },
+            };
+        });
 
         console.log(`Setting ${initialNodes.length} nodes and ${newEdges.length} edges (PCA-based layout)`);
         setNodes(initialNodes);

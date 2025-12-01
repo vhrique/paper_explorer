@@ -7,7 +7,7 @@ from openTSNE import TSNE
 import numpy as np
 
 class GraphService:
-    def build_graph(self, nodes: List[Dict[str, Any]], similarity_threshold: float = 0.85, max_similarity_edges: int = 50) -> Dict[str, Any]:
+    def build_graph(self, nodes: List[Dict[str, Any]], links: List[Dict[str, Any]] = None, similarity_threshold: float = 0.85, max_similarity_edges: int = 50) -> Dict[str, Any]:
         if not nodes:
             return {"nodes": [], "edges": []}
 
@@ -15,69 +15,47 @@ class GraphService:
         embeddings = [node["embedding"] for node in nodes if "embedding" in node and node["embedding"] is not None]
         node_indices = [i for i, node in enumerate(nodes) if "embedding" in node and node["embedding"] is not None]
         
-        if not embeddings:
-             return {"nodes": nodes, "edges": []}
-
         # Convert to numpy array for PCA
-        embeddings_array = np.array(embeddings)
+        embeddings_array = np.array(embeddings) if embeddings else np.empty((0, 0))
         
         # Use PCA to project embeddings to 2D for positioning
         # This places semantically similar content close together
         if len(embeddings) >= 2:
             n_components = min(2, len(embeddings))
-            # pca = PCA(n_components=n_components)
-            # positions_2d = pca.fit_transform(embeddings_array)
-            # pca = KernelPCA(n_components=n_components, kernel='cosine')
-            # positions_2d = pca.fit_transform(embeddings_array)
             tsne = TSNE(n_components=n_components).fit(embeddings_array)
             positions_2d = tsne.transform(embeddings_array)
             
             # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
             scaler = MinMaxScaler(feature_range=(-2000, 2000))
             positions_2d = scaler.fit_transform(positions_2d)
-            
-            # print(f"PCA explained variance: {pca.explained_variance_ratio_}")
         else:
             positions_2d = np.array([[0, 0]] * len(embeddings))
 
-        # Calculate similarity matrix
-        sim_matrix = cosine_similarity(embeddings)
-        
         edges = []
         
         # 1. Sequential Edges (Reading Order) - Keep ALL to maintain flow
         for i in range(len(nodes) - 1):
-            edges.append({
-                "source": nodes[i]["id"],
-                "target": nodes[i+1]["id"],
-                "type": "sequence",
-                "weight": 0.1
-            })
+            # Only link nodes from the same paper
+            if nodes[i].get("paper_id") == nodes[i+1].get("paper_id") and nodes[i].get("paper_id") is not None:
+                edges.append({
+                    "source": nodes[i]["id"],
+                    "target": nodes[i+1]["id"],
+                    "type": "sequence",
+                    "weight": 0.1
+                })
 
-        # 2. Similarity Edges - Collect ALL above threshold, then keep only the strongest
-        all_similarities = []
-        for i in range(len(embeddings)):
-            for j in range(i + 1, len(embeddings)):
-                sim = sim_matrix[i][j]
-                if sim > similarity_threshold:
-                    all_similarities.append({
-                        "i": i,
-                        "j": j,
-                        "similarity": sim
+        # 2. Manual Links
+        if links:
+            node_ids = set(n["id"] for n in nodes)
+            for link in links:
+                # Only add edge if both source and target are in the current graph nodes
+                if link["source_node_id"] in node_ids and link["target_node_id"] in node_ids:
+                    edges.append({
+                        "source": link["source_node_id"],
+                        "target": link["target_node_id"],
+                        "type": "manual",
+                        "weight": 1.0
                     })
-        
-        # Sort by similarity (strongest first) and keep only top N
-        all_similarities.sort(key=lambda x: x['similarity'], reverse=True)
-        top_similarities = all_similarities[:max_similarity_edges]
-        
-        # Add the top similarity edges
-        for sim_data in top_similarities:
-            edges.append({
-                "source": nodes[node_indices[sim_data['i']]]["id"],
-                "target": nodes[node_indices[sim_data['j']]]["id"],
-                "type": "similarity",
-                "weight": float(sim_data['similarity'])
-            })
         
         # Clean up nodes and add 2D positions
         graph_nodes = []
@@ -100,5 +78,5 @@ class GraphService:
                 del n["embedding"]
             graph_nodes.append(n)
 
-        print(f"Graph built: {len(graph_nodes)} nodes, {len(edges)} edges ({len([e for e in edges if e['type']=='sequence'])} sequential, {len([e for e in edges if e['type']=='similarity'])} similarity)")
+        print(f"Graph built: {len(graph_nodes)} nodes, {len(edges)} edges ({len([e for e in edges if e['type']=='sequence'])} sequential, {len([e for e in edges if e['type']=='manual'])} manual)")
         return {"nodes": graph_nodes, "edges": edges}

@@ -402,7 +402,20 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
             
             nodes.append(node)
             
-    graph_data = graph_service.build_graph(nodes)
+    # Fetch all links for this project
+    # We need links where source OR target is in the node_ids list
+    links = []
+    if node_ids:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM links 
+            WHERE source_node_id = ANY(%s) OR target_node_id = ANY(%s)
+        """, (node_ids, node_ids))
+        links = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+    graph_data = graph_service.build_graph(nodes, links=links)
     return graph_data
 
 @app.get("/")
