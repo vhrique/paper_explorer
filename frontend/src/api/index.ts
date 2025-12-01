@@ -197,8 +197,10 @@ export const api = {
     },
 
     // Similarity and Linking API
-    getSimilarNodes: async (noteId: number): Promise<Node[]> => {
-        const response = await axios.get(`${API_URL}/notes/${noteId}/similar`);
+    getSimilarNodes: async (noteId: number, useNewEmbeddings: boolean = false): Promise<Node[]> => {
+        const response = await axios.get(`${API_URL}/notes/${noteId}/similar`, {
+            params: { use_new_embeddings: useNewEmbeddings }
+        });
         return response.data;
     },
 
