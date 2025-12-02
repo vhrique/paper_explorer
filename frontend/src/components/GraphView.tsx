@@ -113,6 +113,7 @@ interface GraphViewProps {
     selectedNodeId?: string;  // Externally selected node (e.g., from PDF click)
     onConnect?: (source: string, target: string) => void;
     onDeleteEdge?: (source: string, target: string) => void;
+    hiddenTagNames?: Set<string>;
 }
 
 // Helper to darken hex color
@@ -136,7 +137,7 @@ const darkenColor = (hex: string, percent: number) => {
     return "#" + rr + gg + bb;
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const reactFlowInstance = React.useRef<any>(null);
@@ -214,81 +215,100 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
         }
 
         // Use PCA positions from backend (semantically meaningful placement)
-        const initialNodes: Node[] = data.nodes.map((node) => ({
-            id: node.id,
-            type: node.type,
-            position: node.position || { x: 0, y: 0 },  // Use PCA position from backend
-            data: {
-                content: node.content,
-                page_number: node.page_number,
-                original: node
-            },
-        }));
+        // Use PCA positions from backend (semantically meaningful placement)
+        const initialNodes: Node[] = data.nodes
+            .filter(node => {
+                if (!hiddenTagNames || hiddenTagNames.size === 0) return true;
+                if (!node.tag_scores) return true;
+                // Check if node has high score for any hidden tag
+                for (const [tagName, score] of Object.entries(node.tag_scores)) {
+                    if (hiddenTagNames.has(tagName) && score > 0.0) {
+                        return false; // Hide if matches a hidden tag
+                    }
+                }
+                return true;
+            })
+            .map((node) => ({
+                id: node.id,
+                type: node.type,
+                position: node.position || { x: 0, y: 0 },  // Use PCA position from backend
+                data: {
+                    content: node.content,
+                    page_number: node.page_number,
+                    original: node
+                },
+            }));
+
+        // Create a set of visible node IDs for edge filtering
+        const visibleNodeIds = new Set(initialNodes.map(n => n.id));
 
         // Create a map for quick node lookup
         const nodeMap = new Map<string, APINode>(data.nodes.map((n: APINode) => [n.id, n]));
 
-        const newEdges: Edge[] = data.edges.map((edge, index) => {
-            let edgeColor = '#93c5fd'; // Default similarity color (though unused now)
-            let strokeWidth = 1;
-            let opacity = 0.6;
+        const newEdges: Edge[] = data.edges
+            .filter(edge => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target))
+            .map((edge, index) => {
+                let edgeColor = '#93c5fd'; // Default similarity color (though unused now)
+                let strokeWidth = 1;
+                let opacity = 0.6;
 
-            if (edge.type === 'sequence') {
-                edgeColor = '#cbd5e1';
-                strokeWidth = 2;
-                opacity = 1;
-            } else if (edge.type === 'manual') {
-                // Find the color of the note involved in the link
-                const sourceNode = nodeMap.get(edge.source);
-                const targetNode = nodeMap.get(edge.target);
+                if (edge.type === 'sequence') {
+                    edgeColor = '#cbd5e1';
+                    strokeWidth = 2;
+                    opacity = 1;
+                } else if (edge.type === 'manual') {
+                    // Find the color of the note involved in the link
+                    const sourceNode = nodeMap.get(edge.source);
+                    const targetNode = nodeMap.get(edge.target);
 
-                let baseColor = '#ef4444';
-                // Prioritize note color
-                if (sourceNode?.type === 'note') {
-                    baseColor = sourceNode.paper_color || '#ef4444';
-                } else if (targetNode?.type === 'note') {
-                    baseColor = targetNode.paper_color || '#ef4444';
+                    let baseColor = '#ef4444';
+                    // Prioritize note color
+                    if (sourceNode?.type === 'note') {
+                        baseColor = sourceNode.paper_color || '#ef4444';
+                    } else if (targetNode?.type === 'note') {
+                        baseColor = targetNode.paper_color || '#ef4444';
+                    } else {
+                        // Fallback to source color or default red
+                        baseColor = sourceNode?.paper_color || '#ef4444';
+                    }
+
+                    // Darken the color by 20% for better visibility
+                    try {
+                        edgeColor = darkenColor(baseColor, 20);
+                    } catch (e) {
+                        edgeColor = baseColor;
+                    }
+
+                    strokeWidth = 3; // Bolder
+                    opacity = 1.0; // Fully opaque
                 } else {
-                    // Fallback to source color or default red
-                    baseColor = sourceNode?.paper_color || '#ef4444';
+                    // Similarity edges (if any remain)
+                    strokeWidth = Math.max(1, edge.weight * 5);
                 }
 
-                // Darken the color by 20% for better visibility
-                try {
-                    edgeColor = darkenColor(baseColor, 20);
-                } catch (e) {
-                    edgeColor = baseColor;
-                }
-
-                strokeWidth = 3; // Bolder
-                opacity = 1.0; // Fully opaque
-            } else {
-                // Similarity edges (if any remain)
-                strokeWidth = Math.max(1, edge.weight * 5);
-            }
-
-            return {
-                id: `e-${index}`,
-                source: edge.source,
-                target: edge.target,
-                type: edge.type === 'sequence' ? 'default' : 'straight',
-                animated: edge.type === 'sequence',
-                style: {
-                    stroke: edgeColor,
-                    strokeWidth: strokeWidth,
-                    opacity: opacity
-                },
-                markerEnd: {
-                    type: MarkerType.ArrowClosed,
-                    color: edgeColor,
-                },
-            };
-        });
+                return {
+                    id: `e-${index}`,
+                    source: edge.source,
+                    target: edge.target,
+                    type: edge.type === 'sequence' ? 'default' : 'straight',
+                    animated: edge.type === 'sequence',
+                    style: {
+                        stroke: edgeColor,
+                        strokeWidth: strokeWidth,
+                        opacity: opacity
+                    },
+                    markerEnd: {
+                        type: MarkerType.ArrowClosed,
+                        color: edgeColor,
+                    },
+                };
+            });
 
         console.log(`Setting ${initialNodes.length} nodes and ${newEdges.length} edges (PCA-based layout)`);
         setNodes(initialNodes);
+        setNodes(initialNodes);
         setEdges(newEdges);
-    }, [data, setNodes, setEdges]);
+    }, [data, setNodes, setEdges, hiddenTagNames]);
 
     const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
         onNodeClick(node.data.original);
