@@ -86,6 +86,20 @@ def init_db():
                 FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
             )
             ''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS svm_models (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                use_global_context BOOLEAN DEFAULT FALSE,
+                num_training_samples INTEGER,
+                num_tags INTEGER,
+                tags_list TEXT,
+                trained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                model_path TEXT,
+                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+            )
+            ''')
             
             # Commit table creation before running migrations
             conn.commit()

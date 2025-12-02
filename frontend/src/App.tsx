@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ProjectList } from './components/ProjectList';
 import { GraphView } from './components/GraphView';
 import { PapersSidebar } from './components/PapersSidebar';
@@ -21,6 +21,16 @@ function App() {
   const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
   const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+
+  // Sync selectedNode with graphData updates to ensure tag_scores are fresh
+  useEffect(() => {
+    if (selectedNode && graphData) {
+      const updatedNode = graphData.nodes.find((n: Node) => n.id === selectedNode.id);
+      if (updatedNode && updatedNode !== selectedNode) {
+        setSelectedNode(updatedNode);
+      }
+    }
+  }, [graphData]);
 
   // Note State
   const [isNoteModalOpen, setIsNoteModalOpen] = useState(false);

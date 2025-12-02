@@ -125,3 +125,13 @@ class Link(LinkBase):
 
     class Config:
         from_attributes = True
+
+class TrainModelRequest(BaseModel):
+    use_global_context: bool = False
+
+class TrainModelResponse(BaseModel):
+    status: str
+    message: str
+    num_training_samples: int
+    num_tags: int
+    nodes_scored: int

@@ -10,12 +10,15 @@ import psycopg2.extras
 from typing import List
 
 from database import init_db, get_db_connection, get_chroma_collection
-from models import ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, NoteCreate, NoteUpdate, Link, LinkCreate
+from models import (ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
+                    NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, 
+                    NoteCreate, NoteUpdate, Link, LinkCreate, TrainModelRequest, TrainModelResponse)
 from services.pdf_processor import PDFProcessor
 from services.embedding import EmbeddingService
 from services.graph import GraphService
 from services.storage import S3StorageService
 from services.similarity import SimilarityService
+from services.tag_service import TagService
 
 
 app = FastAPI(title="Paper Explorer API")
@@ -34,6 +37,7 @@ pdf_processor = PDFProcessor(storage_service)
 embedding_service = EmbeddingService()
 graph_service = GraphService()
 similarity_service = SimilarityService()
+tag_service = TagService(storage_service)
 
 @app.on_event("startup")
 def startup_event():
@@ -397,11 +401,18 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
                 "note_id": metadata.get("note_id")
             }
             
-            # Check if new_embedding exists in metadata
-            if use_new_embeddings and "new_embedding" in metadata:
-                # Parse the new_embedding from string back to list
+            # Include tag_scores if they exist in metadata
+            if "tag_scores" in metadata:
                 import json
-                node["embedding"] = json.loads(metadata["new_embedding"])
+                tag_scores_dict = json.loads(metadata["tag_scores"])
+                node["tag_scores"] = tag_scores_dict
+                
+                # If use_new_embeddings is true, use tag scores as embedding for PCA layout
+                if use_new_embeddings:
+                    # Convert tag_scores dict to a list of values (maintain consistent order)
+                    tag_score_values = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
+                    if len(tag_score_values) > 0:
+                        node["embedding"] = tag_score_values
             
             nodes.append(node)
             
@@ -461,20 +472,67 @@ def list_tags(project_id: int):
 @app.post("/nodes/{node_id}/tags")
 def add_node_tag(node_id: str, tag_id: int = Form(...)):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     try:
+        # Get the project_id for this node by querying the tag
+        cursor.execute("SELECT project_id, type FROM tags WHERE id = %s", (tag_id,))
+        tag_row = cursor.fetchone()
+        
+        if not tag_row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Tag not found")
+        
+        # Determine project_id: use tag's project_id if local, or find node's project
+        if tag_row['type'] == 'local' and tag_row['project_id']:
+            project_id = tag_row['project_id']
+        else:
+            # For global tags, we need to find which project this node belongs to
+            # We'll check all projects until we find the node
+            cursor.execute("SELECT id FROM projects")
+            projects = cursor.fetchall()
+            project_id = None
+            
+            for proj in projects:
+                try:
+                    collection = get_chroma_collection(proj['id'])
+                    result = collection.get(ids=[node_id], include=[])
+                    if result['ids']:
+                        project_id = proj['id']
+                        break
+                except:
+                    continue
+            
+            if not project_id:
+                conn.close()
+                raise HTTPException(status_code=404, detail="Node not found in any project")
+        
+        # Insert the tag assignment
         cursor.execute(
             "INSERT INTO node_tags (tag_id, node_id) VALUES (%s, %s)",
             (tag_id, node_id)
         )
         conn.commit()
+        conn.close()
+        
+        # Train SVM and compute tag scores
+        try:
+            train_result = tag_service.train_and_store_model(project_id, use_global_context=False)
+            nodes_scored = tag_service.compute_tag_scores(project_id)
+            print(f"SVM trained with {train_result['num_training_samples']} samples, {nodes_scored} nodes scored")
+        except ValueError as e:
+            # If training fails (e.g., not enough samples), that's okay for the first tag assignment
+            print(f"Warning: Could not train SVM: {e}")
+        
         return {"message": "Tag added to node"}
     except psycopg2.IntegrityError:
         conn.rollback()
-        raise HTTPException(status_code=400, detail="Tag already assigned to this node")
-    finally:
         conn.close()
+        raise HTTPException(status_code=400, detail="Tag already assigned to this node")
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise
 
 @app.delete("/nodes/{node_id}/tags/{tag_id}")
 def remove_node_tag(node_id: str, tag_id: int):
@@ -787,91 +845,30 @@ def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[d
     conn.close()
     return all_external_nodes
 
-@app.post("/projects/{project_id}/embeddings/compute", response_model=ComputeEmbeddingsResponse)
-def compute_new_embeddings(project_id: int, use_global_context: bool = False):
-    """Compute new embeddings for all nodes in a project"""
-    import json
-    
-    collection = get_chroma_collection(project_id)
-    
-    # Fetch all nodes with embeddings
-    result = collection.get(include=["embeddings", "metadatas"])
-    
-    if not result["ids"]:
-        return ComputeEmbeddingsResponse(
+@app.post("/projects/{project_id}/tags/train", response_model=TrainModelResponse)
+def train_tag_model(project_id: int, request: TrainModelRequest):
+    """Train SVM model for tag suggestions"""
+    try:
+        # Train and store the model
+        train_result = tag_service.train_and_store_model(project_id, request.use_global_context)
+        
+        # Compute and store tag scores for all nodes
+        nodes_scored = tag_service.compute_tag_scores(project_id)
+        
+        return TrainModelResponse(
             status="success",
-            message="No nodes found in project",
-            nodes_processed=0
+            message=f"Successfully trained model and computed tag scores for {nodes_scored} nodes",
+            num_training_samples=train_result['num_training_samples'],
+            num_tags=train_result['num_tags'],
+            nodes_scored=nodes_scored
         )
-    
-    # Fetch all tags for all nodes in one query
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get all node-tag relationships for this project's nodes
-    node_ids = result["ids"]
-    cursor.execute("""
-        SELECT nt.node_id, t.id as tag_id, t.name as tag_name, t.type as tag_type
-        FROM node_tags nt
-        JOIN tags t ON nt.tag_id = t.id
-        WHERE nt.node_id = ANY(%s)
-        ORDER BY nt.node_id, t.name
-    """, (node_ids,))
-    
-    tag_rows = cursor.fetchall()
-    conn.close()
-    
-    # Build a dictionary of node_id -> list of tags
-    node_tags_map = {}
-    for row in tag_rows:
-        node_id = row["node_id"]
-        if node_id not in node_tags_map:
-            node_tags_map[node_id] = []
-        node_tags_map[node_id].append({
-            "tag_id": row["tag_id"],
-            "tag_name": row["tag_name"],
-            "tag_type": row["tag_type"]
-        })
-    
-    # Build nodes list with tags
-    nodes = []
-    for i, id in enumerate(result["ids"]):
-        nodes.append({
-            "id": id,
-            "embedding": result["embeddings"][i],
-            "metadata": result["metadatas"][i],
-            "tags": node_tags_map.get(id, [])  # Include tags, empty list if no tags
-        })
-    
-    # Fetch external nodes if use_global_context is enabled
-    external_nodes = None
-    if use_global_context:
-        external_nodes = get_global_tagged_nodes_from_all_projects(project_id)
-        print(f"Fetched {len(external_nodes)} external nodes with global tags from other projects")
-    
-    # Compute new embeddings
-    nodes_with_new = embedding_service.compute_new_embeddings(nodes, external_nodes=external_nodes)
-    
-    # Update ChromaDB metadata with new embeddings
-    updated_metadatas = []
-    for node in nodes_with_new:
-        metadata = node["metadata"].copy()
-        if "new_embedding" in node:
-            # Store as JSON string in metadata
-            metadata["new_embedding"] = json.dumps(node["new_embedding"])
-        updated_metadatas.append(metadata)
-    
-    # Update the collection
-    collection.update(
-        ids=result["ids"],
-        metadatas=updated_metadatas
-    )
-    
-    return ComputeEmbeddingsResponse(
-        status="success",
-        message=f"Successfully computed new embeddings for {len(nodes_with_new)} nodes",
-        nodes_processed=len(nodes_with_new)
-    )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"Error training model: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to train model: {str(e)}")
 
 @app.post("/projects/{project_id}/notes/", response_model=Note)
 def create_note(project_id: int, note: NoteCreate):
