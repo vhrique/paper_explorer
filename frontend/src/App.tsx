@@ -21,6 +21,12 @@ function App() {
   const [useNewEmbeddings, setUseNewEmbeddings] = useState<boolean>(false);
   const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  const [hiddenTagNames, setHiddenTagNames] = useState<Set<string>>(new Set());
+
+  // Reset hidden tags when project changes
+  useEffect(() => {
+    setHiddenTagNames(new Set());
+  }, [selectedProject?.id]);
 
   // Sync selectedNode with graphData updates to ensure tag_scores are fresh
   useEffect(() => {
@@ -202,6 +208,18 @@ function App() {
     }
   };
 
+  const handleToggleTagVisibility = (tagName: string) => {
+    setHiddenTagNames(prev => {
+      const next = new Set(prev);
+      if (next.has(tagName)) {
+        next.delete(tagName);
+      } else {
+        next.add(tagName);
+      }
+      return next;
+    });
+  };
+
   // Note Handlers
   const handleSaveNote = async (title: string, content: string, color: string) => {
     if (!selectedProject) return;
@@ -325,7 +343,9 @@ function App() {
                     onNodeClick={handleNodeClick}
                     selectedNodeId={selectedNodeId}
                     onConnect={handleCreateLink}
+                    onConnect={handleCreateLink}
                     onDeleteEdge={handleDeleteEdge}
+                    hiddenTagNames={hiddenTagNames}
                   />
                   {/* Floating Advanced View Panel */}
                   <AdvancedViewPanel
@@ -350,7 +370,10 @@ function App() {
                   <TagsPanel
                     key={tagRefreshKey}
                     projectId={selectedProject.id}
+                    projectId={selectedProject.id}
                     onNodeClick={handleNodeClick}
+                    hiddenTagNames={hiddenTagNames}
+                    onToggleTagVisibility={handleToggleTagVisibility}
                   />
 
                   <NoteModal

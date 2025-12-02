@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import type { TagSummary, Tag } from '../api';
-import { Tag as TagIcon, ChevronRight, ChevronDown, Trash2, Edit2, X, Check } from 'lucide-react';
+import { Tag as TagIcon, ChevronRight, ChevronDown, Trash2, Edit2, X, Check, Eye, EyeOff } from 'lucide-react';
 
 interface TagsPanelProps {
     projectId: number;
+    projectId: number;
     onNodeClick: (node: any) => void;
+    hiddenTagNames?: Set<string>;
+    onToggleTagVisibility?: (tagName: string) => void;
 }
 
 interface TaggedNode {
@@ -18,7 +21,7 @@ interface TaggedNode {
     bbox: number[];
 }
 
-export const TagsPanel: React.FC<TagsPanelProps> = ({ projectId, onNodeClick }) => {
+export const TagsPanel: React.FC<TagsPanelProps> = ({ projectId, onNodeClick, hiddenTagNames, onToggleTagVisibility }) => {
     const [tags, setTags] = useState<TagSummary[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [expandedTagId, setExpandedTagId] = useState<number | null>(null);
@@ -186,6 +189,25 @@ export const TagsPanel: React.FC<TagsPanelProps> = ({ projectId, onNodeClick }) 
                                             <span className="text-xs text-gray-400">({tag.node_count})</span>
                                         </div>
                                         <div className="flex items-center gap-1">
+                                            {onToggleTagVisibility && (
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onToggleTagVisibility(tag.tag_name);
+                                                    }}
+                                                    className={`p-1 transition-colors ${hiddenTagNames?.has(tag.tag_name)
+                                                        ? 'text-gray-400 hover:text-gray-600'
+                                                        : 'text-blue-500 hover:text-blue-600'
+                                                        }`}
+                                                    title={hiddenTagNames?.has(tag.tag_name) ? "Show nodes" : "Hide nodes"}
+                                                >
+                                                    {hiddenTagNames?.has(tag.tag_name) ? (
+                                                        <EyeOff size={14} />
+                                                    ) : (
+                                                        <Eye size={14} />
+                                                    )}
+                                                </button>
+                                            )}
                                             <button
                                                 onClick={() => startEditing(tag)}
                                                 className="p-1 text-gray-400 hover:text-blue-600 transition-colors"
