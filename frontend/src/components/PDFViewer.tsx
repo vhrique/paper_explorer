@@ -34,6 +34,17 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
     const [newTagName, setNewTagName] = useState('');
     const [isGlobalTag, setIsGlobalTag] = useState(false);
 
+    // Calculate suggestions
+    const suggestions = React.useMemo(() => {
+        console.log('Node tag scores:', node.tag_scores);
+        if (!node.tag_scores) return [];
+        const currentTagNames = new Set(tags.map(t => t.name));
+        return Object.entries(node.tag_scores)
+            .filter(([tag, score]) => score > 0.0 && !currentTagNames.has(tag))
+            .sort((a, b) => b[1] - a[1])
+            .map(([tag, score]) => ({ name: tag, score }));
+    }, [node.tag_scores, tags]);
+
     // Fetch paper data when paper_id changes
     useEffect(() => {
         const fetchPaper = async () => {
@@ -271,81 +282,122 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                             </button>
                         </span>
                     ))}
-                </div>
 
-                {showTagInput && (
-                    <div className="bg-gray-50 p-3 rounded-lg">
-                        <input
-                            type="text"
-                            value={newTagName}
-                            onChange={(e) => setNewTagName(e.target.value)}
-                            placeholder="Tag name..."
-                            className="w-full text-sm border border-gray-300 rounded-md px-2 py-1 mb-2"
-                        />
-                        <div className="flex items-center gap-2 mb-2">
-                            <input
-                                type="checkbox"
-                                id="isGlobal"
-                                checked={isGlobalTag}
-                                onChange={(e) => setIsGlobalTag(e.target.checked)}
-                            />
-                            <label htmlFor="isGlobal" className="text-xs text-gray-600">Global Tag</label>
-                        </div>
-                        <div className="flex gap-2">
-                            <button
-                                onClick={async () => {
-                                    if (!newTagName.trim()) return;
-                                    try {
-                                        // Check if tag exists
-                                        let tag = availableTags.find(
-                                            t => t.name === newTagName && t.type === (isGlobalTag ? 'global' : 'local')
-                                        );
+                    {/* Suggestions merged into tags list */}
+                    {suggestions.map(({ name, score }) => (
+                        <button
+                            key={name}
+                            onClick={async () => {
+                                try {
+                                    let tag = availableTags.find(t => t.name === name);
 
-                                        // Create tag if it doesn't exist
-                                        if (!tag) {
-                                            tag = await api.createTag(
-                                                newTagName,
-                                                isGlobalTag ? 'global' : 'local',
-                                                isGlobalTag ? undefined : projectId
-                                            );
+                                    // If tag not found in local list, try to create/fetch it
+                                    if (!tag) {
+                                        try {
+                                            // Try to create as local tag
+                                            tag = await api.createTag(name, 'local', projectId);
                                             setAvailableTags([...availableTags, tag]);
+                                        } catch (e) {
+                                            // If creation fails (e.g. exists), try to refresh available tags
+                                            const allTags = await api.listTags(projectId);
+                                            setAvailableTags(allTags);
+                                            tag = allTags.find(t => t.name === name);
                                         }
+                                    }
 
-                                        // Add tag to node
+                                    if (tag) {
                                         await api.addNodeTag(node.id, tag.id);
                                         const updatedTags = await api.getNodeTags(node.id);
                                         setTags(updatedTags);
-                                        setNewTagName('');
-                                        setShowTagInput(false);
-
-                                        // Notify parent that tags were updated
-                                        if (onTagsUpdated) {
-                                            onTagsUpdated();
-                                        }
-                                    } catch (error) {
-                                        console.error('Failed to add tag:', error);
+                                        if (onTagsUpdated) onTagsUpdated();
                                     }
-                                }}
-                                className="px-3 py-1 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700"
-                            >
-                                Add
-                            </button>
-                            <button
-                                onClick={() => {
-                                    setShowTagInput(false);
-                                    setNewTagName('');
-                                }}
-                                className="px-3 py-1 text-gray-600 text-xs hover:bg-gray-200 rounded-md"
-                            >
-                                Cancel
-                            </button>
+                                } catch (error) {
+                                    console.error('Failed to add suggestion:', error);
+                                }
+                            }}
+                            className="px-2 py-1 rounded-full text-xs font-medium border border-dashed border-blue-300 text-blue-600 hover:bg-blue-50 flex items-center gap-1 transition-colors opacity-75 hover:opacity-100"
+                            title={`Suggested Tag (Score: ${score.toFixed(2)})`}
+                        >
+                            + {name}
+                        </button>
+                    ))}
+                </div>
+
+                {
+                    showTagInput && (
+                        <div className="bg-gray-50 p-3 rounded-lg">
+                            <input
+                                type="text"
+                                value={newTagName}
+                                onChange={(e) => setNewTagName(e.target.value)}
+                                placeholder="Tag name..."
+                                className="w-full text-sm border border-gray-300 rounded-md px-2 py-1 mb-2"
+                            />
+                            <div className="flex items-center gap-2 mb-2">
+                                <input
+                                    type="checkbox"
+                                    id="isGlobal"
+                                    checked={isGlobalTag}
+                                    onChange={(e) => setIsGlobalTag(e.target.checked)}
+                                />
+                                <label htmlFor="isGlobal" className="text-xs text-gray-600">Global Tag</label>
+                            </div>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={async () => {
+                                        if (!newTagName.trim()) return;
+                                        try {
+                                            // Check if tag exists
+                                            let tag = availableTags.find(
+                                                t => t.name === newTagName && t.type === (isGlobalTag ? 'global' : 'local')
+                                            );
+
+                                            // Create tag if it doesn't exist
+                                            if (!tag) {
+                                                tag = await api.createTag(
+                                                    newTagName,
+                                                    isGlobalTag ? 'global' : 'local',
+                                                    isGlobalTag ? undefined : projectId
+                                                );
+                                                setAvailableTags([...availableTags, tag]);
+                                            }
+
+                                            // Add tag to node
+                                            await api.addNodeTag(node.id, tag.id);
+                                            const updatedTags = await api.getNodeTags(node.id);
+                                            setTags(updatedTags);
+                                            setNewTagName('');
+                                            setShowTagInput(false);
+
+                                            // Notify parent that tags were updated
+                                            if (onTagsUpdated) {
+                                                onTagsUpdated();
+                                            }
+                                        } catch (error) {
+                                            console.error('Failed to add tag:', error);
+                                        }
+                                    }}
+                                    className="px-3 py-1 bg-blue-600 text-white text-xs rounded-md hover:bg-blue-700"
+                                >
+                                    Add
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setShowTagInput(false);
+                                        setNewTagName('');
+                                    }}
+                                    className="px-3 py-1 text-gray-600 text-xs hover:bg-gray-200 rounded-md"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
                         </div>
-                    </div>
-                )}
-            </div>
+                    )
+                }
+            </div >
 
             {/* PDF Content - Scrollable */}
-            <div className="flex-1 overflow-y-auto bg-gray-100 p-4">
+            < div className="flex-1 overflow-y-auto bg-gray-100 p-4" >
                 <div className="flex flex-col items-center gap-4">
                     <Document
                         file={pdfUrl}
@@ -416,7 +468,7 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                         })}
                     </Document>
                 </div>
-            </div>
-        </div>
+            </div >
+        </div >
     );
 };

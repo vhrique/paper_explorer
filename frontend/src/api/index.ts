@@ -40,6 +40,7 @@ export interface Node {
     paper_color?: string;
     position?: { x: number; y: number };  // PCA-based position from backend
     has_tags?: boolean;  // Whether this node has any tags
+    tag_scores?: Record<string, number>; // SVM decision function scores for tags
     note_id?: string; // ID of the note if type is 'note'
     title?: string; // Title for note
 }
@@ -155,9 +156,9 @@ export const api = {
         return response.data;
     },
 
-    computeNewEmbeddings: async (projectId: number, useGlobalContext: boolean = false): Promise<{ status: string; message: string; nodes_processed: number }> => {
-        const response = await axios.post(`${API_URL}/projects/${projectId}/embeddings/compute`, null, {
-            params: { use_global_context: useGlobalContext }
+    computeNewEmbeddings: async (projectId: number, useGlobalContext: boolean = false): Promise<{ status: string; message: string; num_training_samples: number; num_tags: number; nodes_scored: number }> => {
+        const response = await axios.post(`${API_URL}/projects/${projectId}/tags/train`, {
+            use_global_context: useGlobalContext
         });
         return response.data;
     },
