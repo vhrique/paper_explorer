@@ -343,7 +343,6 @@ function App() {
                     onNodeClick={handleNodeClick}
                     selectedNodeId={selectedNodeId}
                     onConnect={handleCreateLink}
-                    onConnect={handleCreateLink}
                     onDeleteEdge={handleDeleteEdge}
                     hiddenTagNames={hiddenTagNames}
                   />
@@ -369,7 +368,6 @@ function App() {
                   {/* Floating Tags Panel */}
                   <TagsPanel
                     key={tagRefreshKey}
-                    projectId={selectedProject.id}
                     projectId={selectedProject.id}
                     onNodeClick={handleNodeClick}
                     hiddenTagNames={hiddenTagNames}

@@ -19,9 +19,12 @@ services:
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET_NAME=paper-explorer
     depends_on:
-      - postgres
-      - minio
-      - createbuckets
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      createbuckets:
+        condition: service_completed_successfully
     networks:
       - paper-explorer-network
 
@@ -43,7 +46,7 @@ services:
       - paper-explorer-network
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: paper-explorer-postgres
     environment:
       - POSTGRES_USER=user
@@ -53,6 +56,11 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d paper_explorer"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     networks:
       - paper-explorer-network
 
