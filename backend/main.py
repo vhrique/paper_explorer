@@ -9,7 +9,9 @@ import io
 import psycopg2.extras
 from typing import List
 
-from database import init_db, get_db_connection, get_chroma_collection
+from database import (init_db, get_db_connection, insert_nodes, get_nodes_by_project, 
+                     get_nodes_by_ids, get_nodes_by_paper, update_node_metadata, 
+                     update_nodes_by_ids, delete_nodes_by_paper, delete_nodes_by_project, similarity_search)
 from models import (ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
                     NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, 
                     NoteCreate, NoteUpdate, Link, LinkCreate, TrainModelRequest, TrainModelResponse)
@@ -76,18 +78,18 @@ def delete_project(project_id: int):
     cursor = conn.cursor()
     
     try:
-        # Get all node IDs from ChromaDB for this project
-        collection = get_chroma_collection(project_id)
-        result = collection.get(include=[])
+        # Get all node IDs for this project
+        nodes = get_nodes_by_project(project_id, include_embeddings=False)
+        node_ids = [n['id'] for n in nodes]
         
-        if result["ids"]:
+        if node_ids:
             # Delete all node_tags entries for nodes in this project
             cursor.execute(
                 "DELETE FROM node_tags WHERE node_id = ANY(%s)",
-                (result["ids"],)
+                (node_ids,)
             )
         
-        # Delete the project (cascade will handle papers and local tags)
+        # Delete the project (cascade will handle papers, nodes, and local tags)
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         
         conn.commit()
@@ -165,6 +167,7 @@ def get_paper_pdf(paper_id: int):
     except Exception as e:
         print(f"Error fetching PDF: {e}")
         raise HTTPException(status_code=404, detail="PDF file not found")
+        
 @app.patch("/papers/{paper_id}", response_model=Paper)
 def update_paper(paper_id: int, paper_update: PaperUpdate):
     conn = get_db_connection()
@@ -205,28 +208,15 @@ def update_paper(paper_id: int, paper_update: PaperUpdate):
     updated_paper = cursor.fetchone()
     conn.commit()
     
-    # If color changed, update ChromaDB metadata
+    # If color changed, update node metadata
     if paper_update.color is not None:
         try:
-            collection = get_chroma_collection(existing_paper['project_id'])
-            results = collection.get(where={"paper_id": paper_id})
-            
-            if not results["ids"]:
-                results = collection.get(where={"paper_id": str(paper_id)})
-                
-            if results["ids"]:
-                # Update metadata for all nodes
-                new_metadatas = []
-                for metadata in results["metadatas"]:
-                    metadata["paper_color"] = paper_update.color
-                    new_metadatas.append(metadata)
-                    
-                collection.update(
-                    ids=results["ids"],
-                    metadatas=new_metadatas
-                )
+            nodes = get_nodes_by_paper(paper_id)
+            if nodes:
+                node_ids = [n['id'] for n in nodes]
+                update_nodes_by_ids(node_ids, {'paper_color': paper_update.color})
         except Exception as e:
-            print(f"Error updating ChromaDB metadata: {e}")
+            print(f"Error updating node metadata: {e}")
             
     conn.close()
     
@@ -258,32 +248,28 @@ def delete_paper(paper_id: int):
     pdf_key = f"pdfs/{project_id}/{filename}"
     storage_service.delete_file(pdf_key)
     
-    # Remove all nodes belonging to this paper from ChromaDB
+    # Remove all nodes belonging to this paper
     try:
-        collection = get_chroma_collection(project_id)
+        nodes = get_nodes_by_paper(paper_id)
         
-        # Get all IDs for this paper
-        results = collection.get(where={"paper_id": paper_id})
-        
-        # Also try string if int failed (legacy support)
-        if not results["ids"]:
-            results = collection.get(where={"paper_id": str(paper_id)})
-        
-        if results["ids"]:
+        if nodes:
             # Delete images from S3 if any
-            if results["metadatas"]:
-                for metadata in results["metadatas"]:
-                    if metadata.get("type") == "image":
-                        image_key = metadata.get("content")
+            for node in nodes:
+                # Get full node data to check type and content
+                full_nodes = get_nodes_by_ids([node['id']], include_embeddings=False)
+                if full_nodes:
+                    full_node = full_nodes[0]
+                    if full_node.get("type") == "image":
+                        image_key = full_node.get("content")
                         if image_key:
                             storage_service.delete_file(image_key)
 
-            collection.delete(ids=results["ids"])
-            print(f"Successfully deleted {len(results['ids'])} nodes from ChromaDB for paper {paper_id}")
+            count = delete_nodes_by_paper(paper_id)
+            print(f"Successfully deleted {count} nodes for paper {paper_id}")
         else:
             print(f"No nodes found to delete for paper {paper_id}")
     except Exception as e:
-        print(f"Error removing nodes from ChromaDB: {e}")
+        print(f"Error removing nodes: {e}")
         import traceback
         traceback.print_exc()
     
@@ -332,41 +318,36 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     if len(valid_nodes) == 0:
         return {"message": "File uploaded but no valid embeddings generated", "paper_id": paper_id, "nodes_count": 0}
     
-    # Save to ChromaDB with color in metadata
-    collection = get_chroma_collection(project_id)
+    # Save to database with pgvector
+    nodes_to_insert = []
+    for node in valid_nodes:
+        nodes_to_insert.append({
+            'id': node['id'],
+            'project_id': project_id,
+            'paper_id': node['paper_id'],
+            'note_id': None,
+            'type': node['type'],
+            'content': node['content'],
+            'page_number': node['page_number'],
+            'bbox': str(node['bbox']),
+            'paper_color': paper_color,
+            'title': None,
+            'embedding': node['embedding']
+        })
     
-    ids = [node["id"] for node in valid_nodes]
-    embeddings = [node["embedding"] for node in valid_nodes]
-    metadatas = [{
-        "type": node["type"],
-        "content": node["content"],
-        "page_number": node["page_number"],
-        "paper_id": node["paper_id"],
-        "paper_color": paper_color,  # Add color to metadata
-        "bbox": str(node["bbox"]) # Chroma metadata must be str, int, float, bool
-    } for node in valid_nodes]
-    documents = [node["content"] if node["type"] == "text" else "image" for node in valid_nodes]
+    count = insert_nodes(nodes_to_insert)
     
-    collection.add(
-        ids=ids,
-        embeddings=embeddings,
-        metadatas=metadatas,
-        documents=documents
-    )
-    
-    return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": len(valid_nodes)}
+    return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": count}
 
 @app.get("/projects/{project_id}/graph", response_model=GraphData)
 def get_project_graph(project_id: int, use_new_embeddings: bool = False):
-    collection = get_chroma_collection(project_id)
-    
-    # Fetch all nodes
-    result = collection.get(include=["embeddings", "metadatas", "documents"])
+    # Fetch all nodes for the project
+    db_nodes = get_nodes_by_project(project_id, include_embeddings=True)
     
     nodes = []
     node_ids = []
-    if result["ids"]:
-        node_ids = result["ids"]
+    if db_nodes:
+        node_ids = [n['id'] for n in db_nodes]
         
         # Fetch tag information for all nodes in one query
         conn = get_db_connection()
@@ -379,32 +360,30 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
         tagged_node_ids = {row["node_id"] for row in cursor.fetchall()}
         conn.close()
         
-        for i, id in enumerate(result["ids"]):
-            metadata = result["metadatas"][i]
-            
+        for db_node in db_nodes:
             # If it's an image, generate a presigned URL
-            content = metadata["content"]
-            if metadata["type"] == "image":
+            content = db_node["content"]
+            if db_node["type"] == "image":
                 content = storage_service.get_presigned_url(content)
             
             node = {
-                "id": id,
-                "type": metadata["type"],
+                "id": db_node["id"],
+                "type": db_node["type"],
                 "content": content,
-                "page_number": metadata["page_number"],
-                "paper_id": metadata["paper_id"],
-                "paper_color": metadata.get("paper_color", "#3B82F6"),  # Default color if not found
-                "bbox": eval(metadata["bbox"]), # Unsafe but quick for now
-                "embedding": result["embeddings"][i],
-                "has_tags": id in tagged_node_ids,  # Add tag indicator
-                "title": metadata.get("title"),
-                "note_id": metadata.get("note_id")
+                "page_number": db_node["page_number"],
+                "paper_id": db_node["paper_id"],
+                "paper_color": db_node.get("paper_color", "#3B82F6"),
+                "bbox": eval(db_node["bbox"]) if db_node.get("bbox") else [],
+                "embedding": db_node.get("embedding"),
+                "has_tags": db_node["id"] in tagged_node_ids,
+                "title": db_node.get("title"),
+                "note_id": db_node.get("note_id")
             }
             
-            # Include tag_scores if they exist in metadata
-            if "tag_scores" in metadata:
+            # Include tag_scores if they exist
+            if db_node.get("tag_scores"):
                 import json
-                tag_scores_dict = json.loads(metadata["tag_scores"])
+                tag_scores_dict = json.loads(db_node["tag_scores"])
                 node["tag_scores"] = tag_scores_dict
                 
                 # If use_new_embeddings is true, use tag scores as embedding for PCA layout
@@ -417,7 +396,6 @@ def get_project_graph(project_id: int, use_new_embeddings: bool = False):
             nodes.append(node)
             
     # Fetch all links for this project
-    # We need links where source OR target is in the node_ids list
     links = []
     if node_ids:
         conn = get_db_connection()
@@ -488,24 +466,14 @@ def add_node_tag(node_id: str, tag_id: int = Form(...)):
             project_id = tag_row['project_id']
         else:
             # For global tags, we need to find which project this node belongs to
-            # We'll check all projects until we find the node
-            cursor.execute("SELECT id FROM projects")
-            projects = cursor.fetchall()
-            project_id = None
+            cursor.execute("SELECT project_id FROM nodes WHERE id = %s", (node_id,))
+            node_row = cursor.fetchone()
             
-            for proj in projects:
-                try:
-                    collection = get_chroma_collection(proj['id'])
-                    result = collection.get(ids=[node_id], include=[])
-                    if result['ids']:
-                        project_id = proj['id']
-                        break
-                except:
-                    continue
-            
-            if not project_id:
+            if not node_row:
                 conn.close()
                 raise HTTPException(status_code=404, detail="Node not found in any project")
+            
+            project_id = node_row['project_id']
         
         # Insert the tag assignment
         cursor.execute(
@@ -679,66 +647,38 @@ def get_tag_nodes(project_id: int, tag_id: int):
     if not rows:
         return []
         
-    # Now we need to fetch the actual node content from ChromaDB to display snippets
-    # This is a bit heavy but necessary for the UI
-    collection = get_chroma_collection(project_id)
-    
+    # Fetch the actual node content from database
     node_ids = [row['node_id'] for row in rows]
     
     try:
-        results = collection.get(
-            ids=node_ids,
-            include=["metadatas", "documents"]
-        )
+        db_nodes = get_nodes_by_ids(node_ids, include_embeddings=False)
         
         # Create a map for quick lookup
-        chroma_nodes = {}
-        if results['ids']:
-            for i, nid in enumerate(results['ids']):
-                chroma_nodes[nid] = {
-                    "content": results['documents'][i],
-                    "metadata": results['metadatas'][i]
-                }
+        nodes_map = {n['id']: n for n in db_nodes}
         
         # Merge data
         tagged_nodes = []
         for row in rows:
             nid = row['node_id']
-            if nid in chroma_nodes:
-                node_data = chroma_nodes[nid]
-                metadata = node_data['metadata']
+            if nid in nodes_map:
+                node_data = nodes_map[nid]
                 
-                # Only include if it belongs to the requested project (double check)
-                if int(metadata.get('paper_id', 0)) in [p['id'] for p in _get_project_papers(project_id)]:
-                     tagged_nodes.append({
-                        "node_id": nid,
-                        "content": node_data['content'],
-                        "page_number": metadata.get('page_number'),
-                        "paper_id": metadata.get('paper_id'),
-                        "paper_color": metadata.get('paper_color'),
-                        "bbox": eval(metadata.get('bbox', '[]')),
-                        "tagged_at": row['tagged_at']
-                    })
-                else:
-                    # If we can't verify project ownership easily via helper, 
-                    # we can rely on the fact that get_chroma_collection(project_id) 
-                    # only returns nodes for that project (if using separate collections per project).
-                    # Our get_chroma_collection uses "project_{project_id}" so it IS scoped to project.
-                    # So if it's in the collection, it's in the project.
+                # Only include if it belongs to the requested project
+                if node_data.get('project_id') == project_id:
                     tagged_nodes.append({
                         "node_id": nid,
-                        "content": node_data['content'],
-                        "page_number": metadata.get('page_number'),
-                        "paper_id": metadata.get('paper_id'),
-                        "paper_color": metadata.get('paper_color'),
-                        "bbox": eval(metadata.get('bbox', '[]')),
+                        "content": node_data.get('content', ''),
+                        "page_number": node_data.get('page_number'),
+                        "paper_id": node_data.get('paper_id'),
+                        "paper_color": node_data.get('paper_color'),
+                        "bbox": eval(node_data.get('bbox', '[]')) if node_data.get('bbox') else [],
                         "tagged_at": row['tagged_at']
                     })
                     
         return tagged_nodes
         
     except Exception as e:
-        print(f"Error fetching node details from ChromaDB: {e}")
+        print(f"Error fetching node details: {e}")
         return []
 
 def _get_project_papers(project_id: int):
@@ -780,8 +720,6 @@ def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[d
     Fetch all nodes from all projects (except the specified one) that have at least one global tag.
     Returns a list of node dictionaries with embeddings and tags.
     """
-    from database import chroma_client
-    
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
@@ -794,17 +732,14 @@ def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[d
     
     for project_id in project_ids:
         try:
-            # Get the ChromaDB collection for this project
-            collection = chroma_client.get_collection(name=f"project_{project_id}")
+            # Get all nodes from this project
+            db_nodes = get_nodes_by_project(project_id, include_embeddings=True)
             
-            # Fetch all nodes from this project
-            result = collection.get(include=["embeddings", "metadatas"])
-            
-            if not result["ids"]:
+            if not db_nodes:
                 continue
             
             # Get all node IDs for this project
-            node_ids = result["ids"]
+            node_ids = [n['id'] for n in db_nodes]
             
             # Fetch tags for these nodes - only keep nodes with global tags
             cursor.execute("""
@@ -830,11 +765,12 @@ def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[d
                 })
             
             # Build node list - only include nodes that have global tags
-            for i, node_id in enumerate(result["ids"]):
+            for db_node in db_nodes:
+                node_id = db_node['id']
                 if node_id in node_tags_map:  # Only include if has global tags
                     all_external_nodes.append({
                         "id": node_id,
-                        "embedding": result["embeddings"][i],
+                        "embedding": db_node.get('embedding'),
                         "tags": node_tags_map[node_id]
                     })
                     
@@ -887,31 +823,24 @@ def create_note(project_id: int, note: NoteCreate):
     # 2. Generate Embedding
     embedding = embedding_service.generate_text_embedding(note.content)
     
-    # 3. Save to ChromaDB
-    collection = get_chroma_collection(project_id)
+    # 3. Save to database as a node
+    chroma_id = f"note_{new_note['id']}"
     
-    note_id = str(new_note['id'])
-    # Prefix with 'note_' to avoid collision with other IDs if necessary, 
-    # but since other IDs are UUIDs or hashes, simple int ID might collide if not careful.
-    # Actually paper nodes use UUIDs generated in pdf_processor.
-    # Let's use "note_{id}" as the ID in ChromaDB to be safe and distinct.
-    chroma_id = f"note_{note_id}"
+    node_to_insert = {
+        'id': chroma_id,
+        'project_id': project_id,
+        'paper_id': None,
+        'note_id': new_note['id'],
+        'type': 'note',
+        'content': note.content,
+        'page_number': None,
+        'bbox': '[]',
+        'paper_color': note.color,
+        'title': note.title or '',
+        'embedding': embedding
+    }
     
-    collection.add(
-        ids=[chroma_id],
-        embeddings=[embedding],
-        metadatas=[{
-            "type": "note",
-            "title": note.title or "",
-            "content": note.content,
-            "paper_id": -1, # Notes don't belong to a paper
-            "paper_color": note.color,
-            "note_id": note_id,
-            "bbox": "[]",
-            "page_number": 0
-        }],
-        documents=[note.content]
-    )
+    insert_nodes([node_to_insert])
     
     return dict(new_note)
 
@@ -967,40 +896,25 @@ def update_note(note_id: int, note_update: NoteUpdate):
     conn.commit()
     conn.close()
     
-    # Update ChromaDB if content or color changed
+    # Update node in database if content or color changed
     if note_update.content is not None or note_update.color is not None or note_update.title is not None:
         try:
-            collection = get_chroma_collection(existing_note['project_id'])
             chroma_id = f"note_{note_id}"
             
-            # Fetch existing metadata
-            result = collection.get(ids=[chroma_id])
-            if result['ids']:
-                metadata = result['metadatas'][0]
-                
-                # Update metadata
-                if note_update.color is not None:
-                    metadata['paper_color'] = note_update.color
-                if note_update.title is not None:
-                    metadata['title'] = note_update.title
-                if note_update.content is not None:
-                    metadata['content'] = note_update.content
-                    
+            updates = {}
+            if note_update.color is not None:
+                updates['paper_color'] = note_update.color
+            if note_update.title is not None:
+                updates['title'] = note_update.title
+            if note_update.content is not None:
+                updates['content'] = note_update.content
                 # Update embedding if content changed
-                embeddings = None
-                documents = None
-                if note_update.content is not None:
-                    embeddings = [embedding_service.generate_text_embedding(note_update.content)]
-                    documents = [note_update.content]
-                
-                collection.update(
-                    ids=[chroma_id],
-                    embeddings=embeddings,
-                    metadatas=[metadata],
-                    documents=documents
-                )
+                new_embedding = embedding_service.generate_text_embedding(note_update.content)
+                updates['embedding'] = new_embedding
+            
+            update_node_metadata(chroma_id, updates)
         except Exception as e:
-            print(f"Error updating ChromaDB for note: {e}")
+            print(f"Error updating node for note: {e}")
             
     return dict(updated_note)
 
@@ -1022,13 +936,17 @@ def delete_note(note_id: int):
     conn.commit()
     conn.close()
     
-    # Delete from ChromaDB
+    # Delete node from database (CASCADE will handle it via note_id FK)
+    # But we need to explicitly delete it since we're deleting the note first
     try:
-        collection = get_chroma_collection(project_id)
         chroma_id = f"note_{note_id}"
-        collection.delete(ids=[chroma_id])
+        conn_del = get_db_connection()
+        cursor_del = conn_del.cursor()
+        cursor_del.execute("DELETE FROM nodes WHERE id = %s", (chroma_id,))
+        conn_del.commit()
+        conn_del.close()
     except Exception as e:
-        print(f"Error deleting note from ChromaDB: {e}")
+        print(f"Error deleting node for note: {e}")
         
     return {"message": "Note deleted successfully"}
 
@@ -1047,24 +965,21 @@ def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = 
         
     project_id = note['project_id']
     
-    # Get the query embedding
-    collection = get_chroma_collection(project_id)
+    # Get the note's node from database
     chroma_note_id = f"note_{note_id}"
+    note_nodes = get_nodes_by_ids([chroma_note_id], include_embeddings=True)
     
-    # Fetch the note's embedding from ChromaDB
-    note_result = collection.get(ids=[chroma_note_id], include=["embeddings", "metadatas"])
-    
-    if not note_result['ids']:
+    if not note_nodes:
         raise HTTPException(status_code=404, detail="Note embedding not found")
+    
+    note_node = note_nodes[0]
     
     # Get query embedding based on mode
     if use_new_embeddings:
-        # Try to get new_embedding from metadata
-        metadata = note_result['metadatas'][0]
-        new_emb_str = metadata.get('new_embedding')
+        # Try to get tag_scores from node
+        tag_scores_str = note_node.get('tag_scores')
         
-        if not new_emb_str:
-            # Fall back to generating one on the fly or return error
+        if not tag_scores_str:
             raise HTTPException(
                 status_code=400, 
                 detail="New embeddings not computed. Please compute embeddings first in Advanced View."
@@ -1072,27 +987,46 @@ def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = 
         
         try:
             import json
-            query_embedding = json.loads(new_emb_str)
-        except (json.JSONDecodeError, TypeError):
-            raise HTTPException(status_code=500, detail="Failed to parse new embedding")
+            tag_scores_dict = json.loads(tag_scores_str)
+            # Convert to list maintaining consistent order
+            query_embedding = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse tag scores: {e}")
     else:
         # Use original embedding
-        query_embedding = note_result['embeddings'][0]
+        query_embedding = note_node.get('embedding')
+        if not query_embedding:
+            raise HTTPException(status_code=404, detail="Note embedding not found")
     
-    # Fetch all nodes from the collection
-    all_nodes_result = collection.get(include=["embeddings", "metadatas", "documents"])
+    # Fetch all nodes from the project
+    all_nodes = get_nodes_by_project(project_id, include_embeddings=True)
     
-    if not all_nodes_result['ids']:
+    if not all_nodes:
         return []
     
     # Prepare nodes for similarity service
     nodes = []
-    for i, node_id in enumerate(all_nodes_result['ids']):
+    for db_node in all_nodes:
+        # Build metadata dict from node fields
+        metadata = {
+            "type": db_node.get("type"),
+            "content": db_node.get("content"),
+            "page_number": db_node.get("page_number"),
+            "paper_id": db_node.get("paper_id"),
+            "paper_color": db_node.get("paper_color"),
+            "bbox": db_node.get("bbox"),
+            "title": db_node.get("title")
+        }
+        
+        # Add tag_scores if using new embeddings
+        if use_new_embeddings and db_node.get("tag_scores"):
+            metadata["new_embedding"] = db_node.get("tag_scores")  # Tag scores as "new embedding"
+        
         nodes.append({
-            'id': node_id,
-            'embedding': all_nodes_result['embeddings'][i],
-            'metadata': all_nodes_result['metadatas'][i],
-            'document': all_nodes_result['documents'][i]
+            'id': db_node['id'],
+            'embedding': db_node.get('embedding'),
+            'metadata': metadata,
+            'document': db_node.get('content', '')
         })
     
     # Use similarity service to find similar nodes
@@ -1118,7 +1052,7 @@ def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = 
             "page_number": metadata.get("page_number"),
             "paper_id": metadata.get("paper_id"),
             "paper_color": metadata.get("paper_color"),
-            "bbox": eval(metadata.get("bbox", "[]")),
+            "bbox": eval(metadata.get("bbox", "[]")) if metadata.get("bbox") else [],
             "similarity": similarity,
             "title": metadata.get("title")
         }
