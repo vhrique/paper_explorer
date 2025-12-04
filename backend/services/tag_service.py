@@ -8,7 +8,7 @@ from sklearn.svm import SVC
 from sklearn.multiclass import OneVsRestClassifier
 from datetime import datetime
 
-from database import get_db_connection, get_chroma_collection
+from database import get_db_connection, get_nodes_by_project, get_nodes_by_ids, update_nodes_by_ids
 from services.storage import S3StorageService
 import psycopg2.extras
 
@@ -131,42 +131,46 @@ class TagService:
         mlb = model_data['mlb']
         tag_names = model_data['tag_names']
         
-        # Get all nodes from ChromaDB
-        collection = get_chroma_collection(project_id)
-        
+        # Get nodes from database
         if node_ids:
-            result = collection.get(ids=node_ids, include=["embeddings", "metadatas"])
+            result = get_nodes_by_ids(node_ids, include_embeddings=True)
         else:
-            result = collection.get(include=["embeddings", "metadatas"])
+            result = get_nodes_by_project(project_id, include_embeddings=True)
         
-        if not result["ids"]:
+        if not result:
             return 0
         
         # Compute decision function scores
-        embeddings = np.array(result["embeddings"], dtype=float)
+        embeddings = np.array([n['embedding'] for n in result if n.get('embedding') is not None], dtype=float)
+        
+        if len(embeddings) == 0:
+            return 0
+        
         decision_scores = clf.decision_function(embeddings)  # Shape: (n_nodes, n_tags)
         
-        # Update metadata with tag scores
-        updated_metadatas = []
-        for i, node_id in enumerate(result["ids"]):
-            metadata = result["metadatas"][i].copy()
-            
+        # Prepare updates for nodes
+        nodes_to_update = []
+        for i, node in enumerate([n for n in result if n.get('embedding') is not None]):
             # Create tag_scores dictionary
             tag_scores = {}
             for j, tag_name in enumerate(tag_names):
                 tag_scores[tag_name] = float(decision_scores[i][j])
             
-            metadata["tag_scores"] = json.dumps(tag_scores)
-            updated_metadatas.append(metadata)
+            nodes_to_update.append((node['id'], json.dumps(tag_scores)))
         
-        # Update ChromaDB
-        collection.update(
-            ids=result["ids"],
-            metadatas=updated_metadatas
-        )
+        # Bulk update nodes
+        if nodes_to_update:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            for node_id, tag_scores_json in nodes_to_update:
+                cursor.execute("UPDATE nodes SET tag_scores = %s WHERE id = %s", (tag_scores_json, node_id))
+            
+            conn.commit()
+            conn.close()
         
-        print(f"Computed and stored tag scores for {len(result['ids'])} nodes.")
-        return len(result["ids"])
+        print(f"Computed and stored tag scores for {len(nodes_to_update)} nodes.")
+        return len(nodes_to_update)
     
     def _get_training_data(self, project_id: int, use_global_context: bool) -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
@@ -179,26 +183,26 @@ class TagService:
         Returns:
             Tuple of (X_train, Y_train, tag_names)
         """
-        from database import chroma_client
-        
         X_train = []
         tag_list = []  # List of tag name lists for each sample
         all_tag_names = set()
         
-        # Helper function to process nodes from a collection
-        def process_nodes(collection, node_tag_map):
+        # Helper function to process nodes
+        def process_nodes(nodes_list, node_tag_map):
             for node_id, tags in node_tag_map.items():
+                # Find the node in the list
+                node = next((n for n in nodes_list if n['id'] == node_id), None)
+                if not node:
+                    continue
+                
                 try:
-                    result = collection.get(ids=[node_id], include=["embeddings"])
-                    # Check if we got results and embeddings exist
-                    if result["ids"] and len(result["embeddings"]) > 0:
-                        embedding = result["embeddings"][0]
-                        # Check if embedding is not None and has elements
-                        if embedding is not None and len(embedding) > 0:
-                            X_train.append(embedding)
-                            tag_names_for_node = [t["tag_name"] for t in tags]
-                            tag_list.append(tag_names_for_node)
-                            all_tag_names.update(tag_names_for_node)
+                    embedding = node.get('embedding')
+                    # Check if embedding is not None and has elements
+                    if embedding is not None and len(embedding) > 0:
+                        X_train.append(embedding)
+                        tag_names_for_node = [t["tag_name"] for t in tags]
+                        tag_list.append(tag_names_for_node)
+                        all_tag_names.update(tag_names_for_node)
                 except Exception as e:
                     print(f"Error processing node {node_id}: {e}")
                     continue
@@ -207,9 +211,8 @@ class TagService:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        collection = get_chroma_collection(project_id)
-        result = collection.get(include=[])
-        current_project_node_ids = result["ids"]
+        collection = get_nodes_by_project(project_id, include_embeddings=True)
+        current_project_node_ids = [n['id'] for n in collection]
         
         if current_project_node_ids:
             cursor.execute("""
@@ -244,9 +247,8 @@ class TagService:
             for proj_row in other_project_rows:
                 other_project_id = proj_row["id"]
                 try:
-                    other_collection = chroma_client.get_collection(name=f"project_{other_project_id}")
-                    other_result = other_collection.get(include=[])
-                    other_node_ids = other_result["ids"]
+                    other_collection = get_nodes_by_project(other_project_id, include_embeddings=True)
+                    other_node_ids = [n['id'] for n in other_collection]
                     
                     if not other_node_ids:
                         continue

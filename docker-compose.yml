@@ -9,8 +9,6 @@ services:
     volumes:
       # Mount source code for hot-reloading
       - ./backend:/app
-      # Mount persistent storage for database and uploads
-      - ./chroma_db:/app/chroma_db
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://user:password@postgres:5432/paper_explorer
@@ -46,7 +44,7 @@ services:
       - paper-explorer-network
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: paper-explorer-postgres
     environment:
       - POSTGRES_USER=user
