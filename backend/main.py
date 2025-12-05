@@ -481,16 +481,16 @@ def add_node_tag(node_id: str, tag_id: int = Form(...)):
             (tag_id, node_id)
         )
         conn.commit()
-        conn.close()
+        # conn.close()
         
-        # Train SVM and compute tag scores
-        try:
-            train_result = tag_service.train_and_store_model(project_id, use_global_context=False)
-            nodes_scored = tag_service.compute_tag_scores(project_id)
-            print(f"SVM trained with {train_result['num_training_samples']} samples, {nodes_scored} nodes scored")
-        except ValueError as e:
-            # If training fails (e.g., not enough samples), that's okay for the first tag assignment
-            print(f"Warning: Could not train SVM: {e}")
+        # # Train SVM and compute tag scores
+        # try:
+        #     train_result = tag_service.train_and_store_model(project_id, use_global_context=False)
+        #     nodes_scored = tag_service.compute_tag_scores(project_id)
+        #     print(f"SVM trained with {train_result['num_training_samples']} samples, {nodes_scored} nodes scored")
+        # except ValueError as e:
+        #     # If training fails (e.g., not enough samples), that's okay for the first tag assignment
+        #     print(f"Warning: Could not train SVM: {e}")
         
         return {"message": "Tag added to node"}
     except psycopg2.IntegrityError:

@@ -10,9 +10,10 @@ interface SimilarityModalProps {
     noteColor: string;
     onViewNode: (node: Node) => void;
     useNewEmbeddings?: boolean;
+    onLinksChanged?: () => void | Promise<void>;
 }
 
-export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, noteColor, onViewNode, useNewEmbeddings = false }) => {
+export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClose, noteId, noteColor, onViewNode, useNewEmbeddings = false, onLinksChanged }) => {
     const [loading, setLoading] = useState(false);
     const [nodes, setNodes] = useState<Node[]>([]);
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
@@ -87,6 +88,11 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
             nodesToLink.forEach(id => newSelected.delete(id));
             setSelectedNodes(newSelected);
 
+            // Trigger graph refresh
+            if (onLinksChanged) {
+                await onLinksChanged();
+            }
+
         } catch (error) {
             console.error("Failed to create links:", error);
             alert('Failed to create links.');
@@ -115,6 +121,11 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
             const newSelected = new Set(selectedNodes);
             nodesToUnlink.forEach(id => newSelected.delete(id));
             setSelectedNodes(newSelected);
+
+            // Trigger graph refresh
+            if (onLinksChanged) {
+                await onLinksChanged();
+            }
 
         } catch (error) {
             console.error("Failed to remove links:", error);

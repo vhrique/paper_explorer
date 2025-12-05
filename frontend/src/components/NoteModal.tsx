@@ -10,6 +10,7 @@ interface NoteModalProps {
     initialNote?: Note | null;
     onViewNode?: (node: Node) => void;
     useNewEmbeddings?: boolean;
+    onLinksChanged?: () => void | Promise<void>;
 }
 
 const COLORS = [
@@ -21,7 +22,7 @@ const COLORS = [
     "#FBCFE8", // Pink
 ];
 
-const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialNote, onViewNode, useNewEmbeddings = false }) => {
+const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialNote, onViewNode, useNewEmbeddings = false, onLinksChanged }) => {
     const [title, setTitle] = useState('');
     const [content, setContent] = useState('');
     const [color, setColor] = useState(COLORS[0]);
@@ -142,6 +143,7 @@ const NoteModal: React.FC<NoteModalProps> = ({ isOpen, onClose, onSave, initialN
                     noteId={initialNote.id}
                     noteColor={color}
                     useNewEmbeddings={useNewEmbeddings}
+                    onLinksChanged={onLinksChanged}
                     onViewNode={(node) => {
                         if (onViewNode) {
                             onViewNode(node);

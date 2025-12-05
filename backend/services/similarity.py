@@ -51,7 +51,8 @@ class SimilarityService:
                 if not new_emb_str:
                     continue  # Skip nodes without new embeddings
                 try:
-                    embedding = json.loads(new_emb_str)
+                    tag_scores_dict = json.loads(new_emb_str)
+                    embedding = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
                 except (json.JSONDecodeError, TypeError):
                     continue
             else:
