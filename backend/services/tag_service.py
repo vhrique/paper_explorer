@@ -21,7 +21,7 @@ class TagService:
     
     def train_and_store_model(self, project_id: int, use_global_context: bool = False) -> Dict:
         """
-        Train an SVM model on tagged nodes and store it in S3.
+        Train two separate SVM models (global and local tags) and store them in S3.
         
         Args:
             project_id: The project to train the model for
@@ -30,32 +30,64 @@ class TagService:
         Returns:
             Dictionary with training statistics
         """
-        # Get training data
-        X_train, Y_train, tag_names = self._get_training_data(project_id, use_global_context)
+        # Get training data for both global and local tags
+        global_data = self._get_training_data(project_id, use_global_context, tag_type='global')
+        local_data = self._get_training_data(project_id, use_global_context, tag_type='local')
         
-        if len(X_train) == 0:
+        X_train_global, Y_train_global, global_tag_names = global_data
+        X_train_local, Y_train_local, local_tag_names = local_data
+        
+        # Check if we have enough data
+        has_global = len(X_train_global) > 0 and len(X_train_global) > len(global_tag_names)
+        has_local = len(X_train_local) > 0 and len(X_train_local) > len(local_tag_names)
+        
+        if not has_global and not has_local:
             raise ValueError("No tagged nodes found. Please assign tags to nodes before training.")
-        elif len(X_train) <= len(tag_names):
-            raise ValueError("Not enough tagged nodes found. Please assign more tags to nodes before training.")
         
-        print(f"Training SVM with {len(X_train)} samples and {len(tag_names)} tags.")
+        # Train global model if we have global tags
+        global_model_data = None
+        if has_global:
+            print(f"Training Global SVM with {len(X_train_global)} samples and {len(global_tag_names)} tags.")
+            
+            mlb_global = MultiLabelBinarizer()
+            mlb_global.fit([global_tag_names])
+            
+            clf_global = OneVsRestClassifier(
+                SVC(kernel="rbf", class_weight="balanced", probability=True, random_state=42)
+            )
+            clf_global.fit(X_train_global, Y_train_global)
+            
+            global_model_data = {
+                'clf': clf_global,
+                'mlb': mlb_global,
+                'tag_names': global_tag_names
+            }
+        else:
+            print("No global tags found, skipping global model training.")
         
-        # Train the SVM model
-        mlb = MultiLabelBinarizer()
-        mlb.fit([tag_names])  # Fit on all possible tags
+        # Train local model if we have local tags
+        local_model_data = None
+        if has_local:
+            print(f"Training Local SVM with {len(X_train_local)} samples and {len(local_tag_names)} tags.")
+            
+            mlb_local = MultiLabelBinarizer()
+            mlb_local.fit([local_tag_names])
+            
+            clf_local = OneVsRestClassifier(
+                SVC(kernel="rbf", class_weight="balanced", probability=True, random_state=42)
+            )
+            clf_local.fit(X_train_local, Y_train_local)
+            
+            local_model_data = {
+                'clf': clf_local,
+                'mlb': mlb_local,
+                'tag_names': local_tag_names
+            }
+        else:
+            print("No local tags found, skipping local model training.")
         
-        clf = OneVsRestClassifier(
-            SVC(kernel="rbf", class_weight="balanced", probability=True, random_state=42)
-        )
-        clf.fit(X_train, Y_train)
-        
-        # Save model to S3
-        model_data = {
-            'clf': clf,
-            'mlb': mlb,
-            'tag_names': tag_names
-        }
-        model_path = self._save_model_to_storage(project_id, model_data)
+        # Save models to S3
+        model_paths = self._save_models_to_storage(project_id, global_model_data, local_model_data)
         
         # Save metadata to database
         conn = get_db_connection()
@@ -63,6 +95,10 @@ class TagService:
         
         # Delete old model metadata for this project
         cursor.execute("DELETE FROM svm_models WHERE project_id = %s", (project_id,))
+        
+        # Prepare combined tag list
+        all_tags = global_tag_names + local_tag_names
+        total_samples = len(X_train_global) + len(X_train_local)
         
         # Insert new metadata
         cursor.execute("""
@@ -72,30 +108,35 @@ class TagService:
         """, (
             project_id,
             use_global_context,
-            len(X_train),
-            len(tag_names),
-            json.dumps(tag_names),
-            model_path
+            total_samples,
+            len(all_tags),
+            json.dumps(all_tags),
+            json.dumps(model_paths)  # Store both paths as JSON
         ))
         
         conn.commit()
         conn.close()
         
         return {
-            'num_training_samples': len(X_train),
-            'num_tags': len(tag_names),
-            'model_path': model_path
+            'num_training_samples': total_samples,
+            'num_global_samples': len(X_train_global),
+            'num_local_samples': len(X_train_local),
+            'num_tags': len(all_tags),
+            'num_global_tags': len(global_tag_names),
+            'num_local_tags': len(local_tag_names),
+            'model_paths': model_paths
         }
     
     def load_model(self, project_id: int) -> Optional[Dict]:
         """
-        Load the SVM model for a project from S3.
+        Load both SVM models (global and local) for a project from S3.
         
         Args:
-            project_id: The project to load the model for
+            project_id: The project to load the models for
             
         Returns:
-            Dictionary with 'clf', 'mlb', and 'tag_names', or None if no model exists
+            Dictionary with 'global_model' and 'local_model', each containing 'clf', 'mlb', and 'tag_names'
+            Returns None if no models exist
         """
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -110,12 +151,23 @@ class TagService:
         if not row:
             return None
         
-        model_path = row['model_path']
-        return self._load_model_from_storage(model_path)
+        model_paths = row['model_path']
+        
+        # Handle both old format (string) and new format (JSON with global/local paths)
+        if isinstance(model_paths, str):
+            try:
+                model_paths = json.loads(model_paths)
+            except json.JSONDecodeError:
+                # Old format - single model path
+                # Load as global model for backward compatibility
+                old_model = self._load_model_from_storage(model_paths)
+                return {'global_model': old_model, 'local_model': None}
+        
+        return self._load_models_from_storage(model_paths)
     
     def compute_tag_scores(self, project_id: int, node_ids: Optional[List[str]] = None) -> int:
         """
-        Compute SVM decision function scores for nodes and store in ChromaDB metadata.
+        Compute SVM decision function scores for nodes using both global and local models.
         
         Args:
             project_id: The project to compute scores for
@@ -124,14 +176,16 @@ class TagService:
         Returns:
             Number of nodes scored
         """
-        # Load the model
-        model_data = self.load_model(project_id)
-        if not model_data:
+        # Load the models
+        models = self.load_model(project_id)
+        if not models:
             raise ValueError("No trained model found for this project. Please train a model first.")
         
-        clf = model_data['clf']
-        mlb = model_data['mlb']
-        tag_names = model_data['tag_names']
+        global_model = models.get('global_model')
+        local_model = models.get('local_model')
+        
+        if not global_model and not local_model:
+            raise ValueError("No valid models found.")
         
         # Get nodes from database
         if node_ids:
@@ -148,15 +202,29 @@ class TagService:
         if len(embeddings) == 0:
             return 0
         
-        decision_scores = clf.decision_function(embeddings)  # Shape: (n_nodes, n_tags)
-        
         # Prepare updates for nodes
         nodes_to_update = []
         for i, node in enumerate([n for n in result if n.get('embedding') is not None]):
-            # Create tag_scores dictionary
+            # Create tag_scores dictionary by combining both models
             tag_scores = {}
-            for j, tag_name in enumerate(tag_names):
-                tag_scores[tag_name] = float(decision_scores[i][j])
+            
+            # Add global tag scores
+            if global_model:
+                clf_global = global_model['clf']
+                tag_names_global = global_model['tag_names']
+                decision_scores_global = clf_global.decision_function(embeddings[i:i+1])  # Single node
+                
+                for j, tag_name in enumerate(tag_names_global):
+                    tag_scores[tag_name] = float(decision_scores_global[0][j])
+            
+            # Add local tag scores
+            if local_model:
+                clf_local = local_model['clf']
+                tag_names_local = local_model['tag_names']
+                decision_scores_local = clf_local.decision_function(embeddings[i:i+1])  # Single node
+                
+                for j, tag_name in enumerate(tag_names_local):
+                    tag_scores[tag_name] = float(decision_scores_local[0][j])
             
             nodes_to_update.append((node['id'], json.dumps(tag_scores)))
         
@@ -174,13 +242,14 @@ class TagService:
         print(f"Computed and stored tag scores for {len(nodes_to_update)} nodes.")
         return len(nodes_to_update)
     
-    def _get_training_data(self, project_id: int, use_global_context: bool) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    def _get_training_data(self, project_id: int, use_global_context: bool, tag_type: str = 'all') -> Tuple[np.ndarray, np.ndarray, List[str]]:
         """
         Collect training data from tagged nodes.
         
         Args:
             project_id: The project to get training data for
             use_global_context: If True, include nodes with global tags from other projects
+            tag_type: 'global', 'local', or 'all' - which type of tags to collect
             
         Returns:
             Tuple of (X_train, Y_train, tag_names)
@@ -201,8 +270,19 @@ class TagService:
                     embedding = node.get('embedding')
                     # Check if embedding is not None and has elements
                     if embedding is not None and len(embedding) > 0:
+                        # Filter tags based on tag_type
+                        filtered_tags = tags
+                        if tag_type == 'global':
+                            filtered_tags = [t for t in tags if t["tag_type"] == 'global']
+                        elif tag_type == 'local':
+                            filtered_tags = [t for t in tags if t["tag_type"] == 'local']
+                        
+                        # Skip if no tags of the desired type
+                        if not filtered_tags:
+                            continue
+                        
                         X_train.append(embedding)
-                        tag_names_for_node = [t["tag_name"] for t in tags]
+                        tag_names_for_node = [t["tag_name"] for t in filtered_tags]
                         tag_list.append(tag_names_for_node)
                         all_tag_names.update(tag_names_for_node)
                 except Exception as e:
@@ -321,6 +401,44 @@ class TagService:
         print(f"Model saved to S3 at {model_path}")
         return model_path
     
+    def _save_models_to_storage(self, project_id: int, global_model_data: Optional[Dict], local_model_data: Optional[Dict]) -> Dict[str, str]:
+        """
+        Pickle and save both global and local models to S3 storage.
+        
+        Args:
+            project_id: The project ID
+            global_model_data: Dictionary with global model data (or None)
+            local_model_data: Dictionary with local model data (or None)
+            
+        Returns:
+            Dictionary with 'global' and 'local' S3 object keys
+        """
+        paths = {}
+        
+        if global_model_data:
+            # Serialize the global model
+            model_bytes = pickle.dumps(global_model_data)
+            model_file = io.BytesIO(model_bytes)
+            
+            # Upload to S3
+            model_path = f"models/project_{project_id}/svm_model_global.pkl"
+            self.storage_service.upload_file(model_file, model_path, content_type="application/octet-stream")
+            paths['global'] = model_path
+            print(f"Global model saved to S3 at {model_path}")
+        
+        if local_model_data:
+            # Serialize the local model
+            model_bytes = pickle.dumps(local_model_data)
+            model_file = io.BytesIO(model_bytes)
+            
+            # Upload to S3
+            model_path = f"models/project_{project_id}/svm_model_local.pkl"
+            self.storage_service.upload_file(model_file, model_path, content_type="application/octet-stream")
+            paths['local'] = model_path
+            print(f"Local model saved to S3 at {model_path}")
+        
+        return paths
+    
     def _load_model_from_storage(self, model_path: str) -> Dict:
         """
         Load and unpickle model from S3 storage.
@@ -348,3 +466,31 @@ class TagService:
         except Exception as e:
             print(f"Error loading model from S3: {e}")
             raise
+    
+    def _load_models_from_storage(self, model_paths: Dict[str, str]) -> Dict:
+        """
+        Load and unpickle both global and local models from S3 storage.
+        
+        Args:
+            model_paths: Dictionary with 'global' and 'local' S3 object keys
+            
+        Returns:
+            Dictionary with 'global_model' and 'local_model', each containing model data
+        """
+        result = {'global_model': None, 'local_model': None}
+        
+        # Load global model if it exists
+        if 'global' in model_paths:
+            try:
+                result['global_model'] = self._load_model_from_storage(model_paths['global'])
+            except Exception as e:
+                print(f"Error loading global model: {e}")
+        
+        # Load local model if it exists
+        if 'local' in model_paths:
+            try:
+                result['local_model'] = self._load_model_from_storage(model_paths['local'])
+            except Exception as e:
+                print(f"Error loading local model: {e}")
+        
+        return result
