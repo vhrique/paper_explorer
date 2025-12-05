@@ -35,6 +35,8 @@ class TagService:
         
         if len(X_train) == 0:
             raise ValueError("No tagged nodes found. Please assign tags to nodes before training.")
+        elif len(X_train) <= len(tag_names):
+            raise ValueError("Not enough tagged nodes found. Please assign more tags to nodes before training.")
         
         print(f"Training SVM with {len(X_train)} samples and {len(tag_names)} tags.")
         

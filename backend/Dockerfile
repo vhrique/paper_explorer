@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create directories for static files and database
-RUN mkdir -p static/pdfs chroma_db
+# RUN mkdir -p static/pdfs chroma_db
 
 # Expose port
 EXPOSE 8000

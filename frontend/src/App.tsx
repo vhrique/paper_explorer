@@ -384,6 +384,7 @@ function App() {
                     initialNote={editingNote}
                     onViewNode={handleNodeClick}
                     useNewEmbeddings={useNewEmbeddings}
+                    onLinksChanged={handleRefreshView}
                   />
                 </div>
               </div>
