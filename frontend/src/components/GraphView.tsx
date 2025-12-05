@@ -11,6 +11,7 @@ import ReactFlow, {
 import type { Node, Edge, NodeTypes, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { Node as APINode, Edge as APIEdge } from '../api';
+import { Link2 } from 'lucide-react';
 
 // Custom Node Components
 const TextNode = ({ data }: any) => {
@@ -18,7 +19,10 @@ const TextNode = ({ data }: any) => {
     const hasTags = data.original?.has_tags || false;
 
     return (
-        <div className="px-4 py-2 shadow-md rounded-md bg-white w-64 relative" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
+        <div
+            className="px-4 py-2 shadow-md rounded-md bg-white w-64 relative"
+            style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}
+        >
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
             {hasTags && (
                 <div className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center" title="Has tags">
@@ -43,7 +47,10 @@ const ImageNode = ({ data }: any) => {
     const hasTags = data.original?.has_tags || false;
 
     return (
-        <div className="shadow-md rounded-md bg-white p-1 relative" style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}>
+        <div
+            className="shadow-md rounded-md bg-white p-1 relative"
+            style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}
+        >
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
             {hasTags && (
                 <div className="absolute top-1 right-1 w-4 h-4 flex items-center justify-center z-10" title="Has tags">
@@ -67,6 +74,7 @@ const NoteNode = ({ data }: any) => {
     const bgColor = data.original?.paper_color || '#FEF3C7';
     const hasTags = data.original?.has_tags || false;
     const title = data.original?.title;
+    const [showLinkIcon, setShowLinkIcon] = React.useState(false);
 
     return (
         <div
@@ -75,6 +83,8 @@ const NoteNode = ({ data }: any) => {
                 backgroundColor: bgColor,
                 boxShadow: '2px 2px 5px rgba(0,0,0,0.1)'
             }}
+            onMouseEnter={() => setShowLinkIcon(true)}
+            onMouseLeave={() => setShowLinkIcon(false)}
         >
             <Handle type="target" position={Position.Top} className="w-16 opacity-0" />
 
@@ -83,6 +93,21 @@ const NoteNode = ({ data }: any) => {
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
                         <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
                     </svg>
+                </div>
+            )}
+
+            {showLinkIcon && (
+                <div
+                    className="absolute bottom-1 right-1 w-6 h-6 flex items-center justify-center bg-blue-500 rounded-full cursor-pointer hover:bg-blue-600 transition-colors shadow-md z-10"
+                    title="Create link from this node"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (data.onStartLinking) {
+                            data.onStartLinking(data.original.id);
+                        }
+                    }}
+                >
+                    <Link2 size={14} className="text-white" />
                 </div>
             )}
 
@@ -142,12 +167,31 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const reactFlowInstance = React.useRef<any>(null);
     const [contextMenu, setContextMenu] = React.useState<{ id: string; source: string; target: string; x: number; y: number } | null>(null);
+    const [linkCreationSource, setLinkCreationSource] = React.useState<string | null>(null);
+    const [mousePosition, setMousePosition] = React.useState<{ x: number; y: number } | null>(null);
 
     const onConnectCallback = useCallback((params: Connection) => {
         if (onConnect && params.source && params.target) {
             onConnect(params.source, params.target);
         }
     }, [onConnect]);
+
+    const handleStartLinking = useCallback((nodeId: string) => {
+        console.log('Starting link creation from:', nodeId);
+        setLinkCreationSource(nodeId);
+    }, []);
+
+    // Track mouse position for link preview
+    const handleMouseMove = useCallback((event: React.MouseEvent) => {
+        if (linkCreationSource && reactFlowInstance.current) {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const position = reactFlowInstance.current.project({
+                x: event.clientX - bounds.left,
+                y: event.clientY - bounds.top,
+            });
+            setMousePosition(position);
+        }
+    }, [linkCreationSource]);
 
     const onEdgeContextMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
         event.preventDefault();
@@ -164,7 +208,12 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
 
     const onPaneClick = useCallback(() => {
         setContextMenu(null);
-    }, []);
+        // Cancel link creation if clicking on empty space
+        if (linkCreationSource) {
+            setLinkCreationSource(null);
+            setMousePosition(null);
+        }
+    }, [linkCreationSource]);
 
     const handleDeleteEdge = () => {
         if (contextMenu && onDeleteEdge) {
@@ -235,7 +284,8 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                 data: {
                     content: node.content,
                     page_number: node.page_number,
-                    original: node
+                    original: node,
+                    onStartLinking: handleStartLinking
                 },
             }));
 
@@ -290,7 +340,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                     id: `e-${index}`,
                     source: edge.source,
                     target: edge.target,
-                    type: edge.type === 'sequence' ? 'default' : 'straight',
+                    type: 'default',  // Use bezier curves for all edges
                     animated: edge.type === 'sequence',
                     style: {
                         stroke: edgeColor,
@@ -310,9 +360,115 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
         setEdges(newEdges);
     }, [data, setNodes, setEdges, hiddenTagNames]);
 
+    // Add temporary preview edge during link creation
+    useEffect(() => {
+        if (linkCreationSource && mousePosition && nodes.length > 0) {
+            const sourceNode = nodes.find(n => n.id === linkCreationSource);
+            if (sourceNode) {
+                // Find the original node data to get color
+                const originalNode = data.nodes.find(n => n.id === linkCreationSource);
+                const edgeColor = originalNode?.paper_color ? darkenColor(originalNode.paper_color, 20) : '#3B82F6';
+
+                const previewEdge: Edge = {
+                    id: 'preview-edge',
+                    source: linkCreationSource,
+                    target: 'preview-target',
+                    type: 'default',
+                    animated: true,
+                    style: {
+                        stroke: edgeColor,
+                        strokeWidth: 3,
+                        opacity: 0.6,
+                        strokeDasharray: '5,5'
+                    },
+                    markerEnd: {
+                        type: MarkerType.ArrowClosed,
+                        color: edgeColor,
+                    },
+                };
+
+                // Create a temporary invisible target node at mouse position
+                const previewTargetNode: Node = {
+                    id: 'preview-target',
+                    type: 'default',
+                    position: mousePosition,
+                    data: {},
+                    draggable: false,
+                    selectable: false,
+                    connectable: false,
+                    style: {
+                        opacity: 0,
+                        width: 1,
+                        height: 1,
+                        pointerEvents: 'none' // Critical: prevents blocking clicks on real nodes
+                    },
+                };
+
+                setNodes(nds => {
+                    const filtered = nds.filter(n => n.id !== 'preview-target');
+                    return [...filtered, previewTargetNode];
+                });
+
+                setEdges(eds => {
+                    const filtered = eds.filter(e => e.id !== 'preview-edge');
+                    return [...filtered, previewEdge];
+                });
+            }
+        } else {
+            // Remove preview edge and node when not in link creation mode
+            setNodes(nds => nds.filter(n => n.id !== 'preview-target'));
+            setEdges(eds => eds.filter(e => e.id !== 'preview-edge'));
+        }
+    }, [linkCreationSource, mousePosition, nodes.length, data.nodes]);
+
     const handleNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+        // If in link creation mode, complete the link
+        if (linkCreationSource) {
+            // Only allow linking to text nodes
+            if (node.data.original.type !== 'text') {
+                console.log('Links can only be created to text nodes');
+                setLinkCreationSource(null);
+                setMousePosition(null);
+                return;
+            }
+
+            if (linkCreationSource !== node.id && onConnect) {
+                onConnect(linkCreationSource, node.id);
+            }
+            setLinkCreationSource(null);
+            setMousePosition(null);
+            return;
+        }
         onNodeClick(node.data.original);
-    }, [onNodeClick]);
+    }, [onNodeClick, linkCreationSource, onConnect]);
+
+    // Visual feedback for link creation mode
+    useEffect(() => {
+        if (linkCreationSource) {
+            setNodes(nds => nds.map(n => {
+                // Highlight source node
+                if (n.id === linkCreationSource) {
+                    return {
+                        ...n,
+                        className: 'ring-4 ring-blue-500 ring-opacity-50'
+                    };
+                }
+                // Highlight valid target nodes (text nodes only)
+                if (n.data.original.type === 'text') {
+                    return {
+                        ...n,
+                        className: 'ring-2 ring-green-400 ring-opacity-30'
+                    };
+                }
+                return n;
+            }));
+        } else {
+            setNodes(nds => nds.map(n => ({
+                ...n,
+                className: ''
+            })));
+        }
+    }, [linkCreationSource]);
 
     return (
         <div className="w-full h-full bg-gray-50">
@@ -326,6 +482,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                 onConnect={onConnectCallback}
                 onEdgeContextMenu={onEdgeContextMenu}
                 onPaneClick={onPaneClick}
+                onMouseMove={handleMouseMove}
                 nodeTypes={nodeTypes}
                 onInit={(instance) => { reactFlowInstance.current = instance; }}
                 fitView
