@@ -75,12 +75,28 @@ def list_projects():
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int):
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
     try:
+        # Get all papers for this project to delete PDFs
+        cursor.execute("SELECT id, filename FROM papers WHERE project_id = %s", (project_id,))
+        papers = cursor.fetchall()
+        
         # Get all node IDs for this project
         nodes = get_nodes_by_project(project_id, include_embeddings=False)
         node_ids = [n['id'] for n in nodes]
+        
+        # Delete image files from storage
+        if nodes:
+            for node in nodes:
+                if node.get("type") == "image":
+                    image_key = node.get("content")
+                    if image_key:
+                        try:
+                            storage_service.delete_file(image_key)
+                            print(f"Deleted image: {image_key}")
+                        except Exception as e:
+                            print(f"Error deleting image {image_key}: {e}")
         
         if node_ids:
             # Delete all node_tags entries for nodes in this project
@@ -89,10 +105,19 @@ def delete_project(project_id: int):
                 (node_ids,)
             )
         
-        # Delete the project (cascade will handle papers, nodes, and local tags)
+        # Delete the project (cascade will handle papers, nodes, notes, local tags, and svm_models)
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
         
         conn.commit()
+        
+        # Delete PDF files from storage after database commit
+        for paper in papers:
+            pdf_key = f"pdfs/{project_id}/{paper['filename']}"
+            try:
+                storage_service.delete_file(pdf_key)
+                print(f"Deleted PDF: {pdf_key}")
+            except Exception as e:
+                print(f"Error deleting PDF {pdf_key}: {e}")
     except Exception as e:
         conn.rollback()
         print(f"Error deleting project: {e}")
