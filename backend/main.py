@@ -1020,7 +1020,7 @@ def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = 
     else:
         # Use original embedding
         query_embedding = note_node.get('embedding')
-        if not query_embedding:
+        if query_embedding is None:
             raise HTTPException(status_code=404, detail="Note embedding not found")
     
     # Fetch all nodes from the project
