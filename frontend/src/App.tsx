@@ -22,10 +22,14 @@ function App() {
   const [tagRefreshKey, setTagRefreshKey] = useState<number>(0);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [hiddenTagNames, setHiddenTagNames] = useState<Set<string>>(new Set());
+  const [hiddenPaperIds, setHiddenPaperIds] = useState<Set<number>>(new Set());
+  const [hiddenNoteIds, setHiddenNoteIds] = useState<Set<number>>(new Set());
 
-  // Reset hidden tags when project changes
+  // Reset hidden tags, papers, and notes when project changes
   useEffect(() => {
     setHiddenTagNames(new Set());
+    setHiddenPaperIds(new Set());
+    setHiddenNoteIds(new Set());
   }, [selectedProject?.id]);
 
   // Sync selectedNode with graphData updates to ensure tag_scores are fresh
@@ -209,12 +213,36 @@ function App() {
   };
 
   const handleToggleTagVisibility = (tagName: string) => {
-    setHiddenTagNames(prev => {
+    setHiddenTagNames((prev: Set<string>) => {
       const next = new Set(prev);
       if (next.has(tagName)) {
         next.delete(tagName);
       } else {
         next.add(tagName);
+      }
+      return next;
+    });
+  };
+
+  const handleTogglePaperVisibility = (paperId: number) => {
+    setHiddenPaperIds((prev: Set<number>) => {
+      const next = new Set(prev);
+      if (next.has(paperId)) {
+        next.delete(paperId);
+      } else {
+        next.add(paperId);
+      }
+      return next;
+    });
+  };
+
+  const handleToggleNoteVisibility = (noteId: number) => {
+    setHiddenNoteIds((prev: Set<number>) => {
+      const next = new Set(prev);
+      if (next.has(noteId)) {
+        next.delete(noteId);
+      } else {
+        next.add(noteId);
       }
       return next;
     });
@@ -345,6 +373,8 @@ function App() {
                     onConnect={handleCreateLink}
                     onDeleteEdge={handleDeleteEdge}
                     hiddenTagNames={hiddenTagNames}
+                    hiddenPaperIds={hiddenPaperIds}
+                    hiddenNoteIds={hiddenNoteIds}
                   />
                   {/* Floating Advanced View Panel */}
                   <AdvancedViewPanel
@@ -364,6 +394,10 @@ function App() {
                     onEditNote={handleEditNote}
                     onAddNote={handleAddNote}
                     refreshTrigger={sidebarRefreshTrigger}
+                    hiddenPaperIds={hiddenPaperIds}
+                    hiddenNoteIds={hiddenNoteIds}
+                    onTogglePaperVisibility={handleTogglePaperVisibility}
+                    onToggleNoteVisibility={handleToggleNoteVisibility}
                   />
                   {/* Floating Tags Panel */}
                   <TagsPanel

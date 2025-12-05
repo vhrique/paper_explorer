@@ -3,7 +3,7 @@ import { api } from '../api';
 import type { Paper, Note } from '../api';
 import { PDFUploader } from './PDFUploader';
 import { EditPaperModal } from './EditPaperModal';
-import { FileText, ChevronLeft, ChevronRight, Trash2, Edit2, StickyNote, Plus } from 'lucide-react';
+import { FileText, ChevronLeft, ChevronRight, Trash2, Edit2, StickyNote, Plus, Eye, EyeOff } from 'lucide-react';
 
 interface PapersSidebarProps {
     projectId: number;
@@ -11,6 +11,10 @@ interface PapersSidebarProps {
     onEditNote: (note: Note) => void;
     onAddNote: () => void;
     refreshTrigger: number;
+    hiddenPaperIds?: Set<number>;
+    hiddenNoteIds?: Set<number>;
+    onTogglePaperVisibility?: (paperId: number) => void;
+    onToggleNoteVisibility?: (noteId: number) => void;
 }
 
 export const PapersSidebar: React.FC<PapersSidebarProps> = ({
@@ -18,7 +22,11 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
     onUploadComplete,
     onEditNote,
     onAddNote,
-    refreshTrigger
+    refreshTrigger,
+    hiddenPaperIds,
+    hiddenNoteIds,
+    onTogglePaperVisibility,
+    onToggleNoteVisibility
 }) => {
     const [papers, setPapers] = useState<Paper[]>([]);
     const [notes, setNotes] = useState<Note[]>([]);
@@ -154,12 +162,31 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
                                     >
                                         <Edit2 size={16} />
                                     </button>
+                                    {onTogglePaperVisibility && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onTogglePaperVisibility(paper.id);
+                                            }}
+                                            className={`absolute top-2 right-16 p-1.5 transition-colors opacity-0 group-hover:opacity-100 rounded-lg ${hiddenPaperIds?.has(paper.id)
+                                                    ? 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                                                    : 'text-blue-500 hover:text-blue-600 hover:bg-blue-50'
+                                                }`}
+                                            title={hiddenPaperIds?.has(paper.id) ? "Show in graph" : "Hide from graph"}
+                                        >
+                                            {hiddenPaperIds?.has(paper.id) ? (
+                                                <EyeOff size={16} />
+                                            ) : (
+                                                <Eye size={16} />
+                                            )}
+                                        </button>
+                                    )}
 
                                     <div className="flex items-start gap-3">
                                         <div className="p-2 rounded-lg" style={{ backgroundColor: `${paper.color}20` }}>
                                             <FileText size={20} style={{ color: paper.color }} />
                                         </div>
-                                        <div className="flex-1 min-w-0 pr-8">
+                                        <div className="flex-1 min-w-0 pr-16">
                                             <h4 className="font-semibold text-sm text-gray-800 truncate">
                                                 {paper.title}
                                             </h4>
@@ -210,8 +237,27 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
                                     >
                                         <Trash2 size={16} />
                                     </button>
+                                    {onToggleNoteVisibility && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onToggleNoteVisibility(note.id);
+                                            }}
+                                            className={`absolute top-2 right-9 p-1.5 transition-colors opacity-0 group-hover:opacity-100 rounded-lg ${hiddenNoteIds?.has(note.id)
+                                                    ? 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+                                                    : 'text-blue-500 hover:text-blue-600 hover:bg-white/50'
+                                                }`}
+                                            title={hiddenNoteIds?.has(note.id) ? "Show in graph" : "Hide from graph"}
+                                        >
+                                            {hiddenNoteIds?.has(note.id) ? (
+                                                <EyeOff size={16} />
+                                            ) : (
+                                                <Eye size={16} />
+                                            )}
+                                        </button>
+                                    )}
 
-                                    <div className="pr-6">
+                                    <div className="pr-14">
                                         {note.title && (
                                             <h4 className="font-semibold text-sm text-gray-800 mb-1 truncate">
                                                 {note.title}

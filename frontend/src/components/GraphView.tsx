@@ -139,6 +139,8 @@ interface GraphViewProps {
     onConnect?: (source: string, target: string) => void;
     onDeleteEdge?: (source: string, target: string) => void;
     hiddenTagNames?: Set<string>;
+    hiddenPaperIds?: Set<number>;
+    hiddenNoteIds?: Set<number>;
 }
 
 // Helper to darken hex color
@@ -162,7 +164,7 @@ const darkenColor = (hex: string, percent: number) => {
     return "#" + rr + gg + bb;
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames, hiddenPaperIds, hiddenNoteIds }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const reactFlowInstance = React.useRef<any>(null);
@@ -267,14 +269,38 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
         // Use PCA positions from backend (semantically meaningful placement)
         const initialNodes: Node[] = data.nodes
             .filter(node => {
-                if (!hiddenTagNames || hiddenTagNames.size === 0) return true;
-                if (!node.tag_scores) return true;
-                // Check if node has high score for any hidden tag
-                for (const [tagName, score] of Object.entries(node.tag_scores)) {
-                    if (hiddenTagNames.has(tagName) && score > 0.0) {
-                        return false; // Hide if matches a hidden tag
+                // Filter by tag visibility
+                if (hiddenTagNames && hiddenTagNames.size > 0) {
+                    if (node.tag_scores) {
+                        // Check if node has high score for any hidden tag
+                        for (const [tagName, score] of Object.entries(node.tag_scores)) {
+                            if (hiddenTagNames.has(tagName) && score > 0.0) {
+                                return false; // Hide if matches a hidden tag
+                            }
+                        }
                     }
                 }
+
+                // Filter by paper visibility (for text and image nodes)
+                if (hiddenPaperIds && hiddenPaperIds.size > 0) {
+                    if (node.type === 'text' || node.type === 'image') {
+                        if (node.paper_id && hiddenPaperIds.has(node.paper_id)) {
+                            return false; // Hide if paper is hidden
+                        }
+                    }
+                }
+
+                // Filter by note visibility (for note nodes)
+                if (hiddenNoteIds && hiddenNoteIds.size > 0) {
+                    if (node.type === 'note') {
+                        // Extract note ID from node.id (format: "note_{id}")
+                        const noteId = parseInt(node.id.replace('note_', ''));
+                        if (!isNaN(noteId) && hiddenNoteIds.has(noteId)) {
+                            return false; // Hide if note is hidden
+                        }
+                    }
+                }
+
                 return true;
             })
             .map((node) => ({
@@ -358,7 +384,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
         setNodes(initialNodes);
         setNodes(initialNodes);
         setEdges(newEdges);
-    }, [data, setNodes, setEdges, hiddenTagNames]);
+    }, [data, setNodes, setEdges, hiddenTagNames, hiddenPaperIds, hiddenNoteIds]);
 
     // Add temporary preview edge during link creation
     useEffect(() => {
