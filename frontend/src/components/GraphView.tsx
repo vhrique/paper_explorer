@@ -11,17 +11,20 @@ import ReactFlow, {
 import type { Node, Edge, NodeTypes, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { Node as APINode, Edge as APIEdge } from '../api';
-import { Link2 } from 'lucide-react';
+import { Link2, StickyNote } from 'lucide-react';
 
 // Custom Node Components
 const TextNode = ({ data }: any) => {
     const borderColor = data.original?.paper_color || '#3B82F6';
     const hasTags = data.original?.has_tags || false;
+    const [showNoteIcon, setShowNoteIcon] = React.useState(false);
 
     return (
         <div
             className="px-4 py-2 shadow-md rounded-md bg-white w-64 relative"
             style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}
+            onMouseEnter={() => setShowNoteIcon(true)}
+            onMouseLeave={() => setShowNoteIcon(false)}
         >
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
             {hasTags && (
@@ -29,6 +32,18 @@ const TextNode = ({ data }: any) => {
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
                         <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
                     </svg>
+                </div>
+            )}
+            {showNoteIcon && data.onCreateNoteFromNode && (
+                <div
+                    className="absolute top-1 left-1 w-6 h-6 flex items-center justify-center bg-blue-500 rounded-full cursor-pointer hover:bg-blue-600 transition-colors shadow-md z-10"
+                    title="Create note from this text"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        data.onCreateNoteFromNode(data.original.id);
+                    }}
+                >
+                    <StickyNote size={14} className="text-white" />
                 </div>
             )}
             <div className="flex items-center">
@@ -45,11 +60,14 @@ const TextNode = ({ data }: any) => {
 const ImageNode = ({ data }: any) => {
     const borderColor = data.original?.paper_color || '#8B5CF6';
     const hasTags = data.original?.has_tags || false;
+    const [showNoteIcon, setShowNoteIcon] = React.useState(false);
 
     return (
         <div
             className="shadow-md rounded-md bg-white p-1 relative"
             style={{ borderWidth: '2px', borderStyle: 'solid', borderColor }}
+            onMouseEnter={() => setShowNoteIcon(true)}
+            onMouseLeave={() => setShowNoteIcon(false)}
         >
             <Handle type="target" position={Position.Top} className="w-16" style={{ background: borderColor }} />
             {hasTags && (
@@ -57,6 +75,18 @@ const ImageNode = ({ data }: any) => {
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-500">
                         <path fillRule="evenodd" d="M5.5 3A2.5 2.5 0 003 5.5v2.879a2.5 2.5 0 00.732 1.767l6.5 6.5a2.5 2.5 0 003.536 0l2.878-2.878a2.5 2.5 0 000-3.536l-6.5-6.5A2.5 2.5 0 008.38 3H5.5zM6 7a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
                     </svg>
+                </div>
+            )}
+            {showNoteIcon && data.onCreateNoteFromNode && (
+                <div
+                    className="absolute top-1 left-1 w-6 h-6 flex items-center justify-center bg-blue-500 rounded-full cursor-pointer hover:bg-blue-600 transition-colors shadow-md z-10"
+                    title="Create note from this image"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        data.onCreateNoteFromNode(data.original.id);
+                    }}
+                >
+                    <StickyNote size={14} className="text-white" />
                 </div>
             )}
             <img
@@ -141,6 +171,7 @@ interface GraphViewProps {
     hiddenTagNames?: Set<string>;
     hiddenPaperIds?: Set<number>;
     hiddenNoteIds?: Set<number>;
+    onCreateNoteFromNode?: (nodeId: string) => void;
 }
 
 // Helper to darken hex color
@@ -164,7 +195,7 @@ const darkenColor = (hex: string, percent: number) => {
     return "#" + rr + gg + bb;
 };
 
-export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames, hiddenPaperIds, hiddenNoteIds }) => {
+export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames, hiddenPaperIds, hiddenNoteIds, onCreateNoteFromNode }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
     const reactFlowInstance = React.useRef<any>(null);
@@ -236,11 +267,18 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                     padding: 0.5,
                 });
 
-                // Temporarily highlight the node
-                setNodes(nds => nds.map(n => ({
-                    ...n,
-                    className: n.id === selectedNodeId ? 'selected-node-highlight' : ''
-                })));
+                // Bring the node to the front (highest z-index) by moving it to the end of the array
+                // and temporarily highlight it
+                setNodes(nds => {
+                    const otherNodes = nds.filter(n => n.id !== selectedNodeId);
+                    const selectedNodeObj = nds.find(n => n.id === selectedNodeId);
+                    if (!selectedNodeObj) return nds;
+
+                    return [
+                        ...otherNodes.map(n => ({ ...n, className: '' })),
+                        { ...selectedNodeObj, className: 'selected-node-highlight' }
+                    ];
+                });
 
                 // Remove highlight after 2 seconds
                 setTimeout(() => {
@@ -311,7 +349,8 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                     content: node.content,
                     page_number: node.page_number,
                     original: node,
-                    onStartLinking: handleStartLinking
+                    onStartLinking: handleStartLinking,
+                    onCreateNoteFromNode: onCreateNoteFromNode
                 },
             }));
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { X, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
+import { X, ZoomIn, ZoomOut, Loader2, StickyNote } from 'lucide-react';
 import type { Node, Paper, Tag } from '../api';
 import { api } from '../api';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
@@ -16,9 +16,10 @@ interface PDFViewerProps {
     onTagsUpdated?: () => void;
     onPDFClick?: (nodeId: string) => void;
     allNodes?: Node[];  // All nodes in the project for hit detection
+    onCreateNoteFromNode?: (nodeId: string) => void;
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated, onPDFClick, allNodes }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated, onPDFClick, allNodes, onCreateNoteFromNode }) => {
     const [paper, setPaper] = useState<Paper | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.0);
@@ -445,19 +446,37 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                                     </div>
                                     {/* Only show highlight on the correct page */}
                                     {isHighlightedPage && (
-                                        <div
-                                            style={{
-                                                position: 'absolute',
-                                                left: `${x0 * scale}px`,
-                                                top: `${y0 * scale}px`,
-                                                width: `${(x1 - x0) * scale}px`,
-                                                height: `${(y1 - y0) * scale}px`,
-                                                border: `3px solid ${borderColor}`,
-                                                backgroundColor: `${borderColor}20`,
-                                                pointerEvents: 'none',
-                                                zIndex: 10,
-                                            }}
-                                        />
+                                        <>
+                                            <div
+                                                style={{
+                                                    position: 'absolute',
+                                                    left: `${x0 * scale}px`,
+                                                    top: `${y0 * scale}px`,
+                                                    width: `${(x1 - x0) * scale}px`,
+                                                    height: `${(y1 - y0) * scale}px`,
+                                                    border: `3px solid ${borderColor}`,
+                                                    backgroundColor: `${borderColor}20`,
+                                                    pointerEvents: 'none',
+                                                    zIndex: 10,
+                                                }}
+                                            />
+                                            {/* Note creation button */}
+                                            {onCreateNoteFromNode && (
+                                                <button
+                                                    onClick={() => onCreateNoteFromNode(node.id)}
+                                                    className="absolute p-2 bg-white rounded-lg shadow-lg hover:bg-blue-50 transition-colors border border-gray-300 hover:border-blue-400"
+                                                    style={{
+                                                        left: `${(x1 - x0) * scale + x0 * scale + 8}px`,
+                                                        top: `${y0 * scale - 8}px`,
+                                                        zIndex: 20,
+                                                        pointerEvents: 'auto',
+                                                    }}
+                                                    title="Create note from this text"
+                                                >
+                                                    <StickyNote size={20} className="text-blue-600" />
+                                                </button>
+                                            )}
+                                        </>
                                     )}
                                     {/* Page number label */}
                                     <div className="text-center text-sm text-gray-600 mt-2">
