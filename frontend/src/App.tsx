@@ -46,6 +46,7 @@ function App() {
   const [isNoteModalOpen, setIsNoteModalOpen] = useState(false);
   const [editingNote, setEditingNote] = useState<Note | null>(null);
   const [sidebarRefreshTrigger, setSidebarRefreshTrigger] = useState(0);
+  const [noteSourceNodeId, setNoteSourceNodeId] = useState<string | null>(null);
 
   const handleSelectProject = async (project: Project) => {
     setSelectedProject(project);
@@ -253,10 +254,18 @@ function App() {
     if (!selectedProject) return;
 
     try {
+      let createdOrUpdatedNote: Note;
       if (editingNote) {
-        await api.updateNote(editingNote.id, { title, content, color });
+        createdOrUpdatedNote = await api.updateNote(editingNote.id, { title, content, color });
       } else {
-        await api.createNote(selectedProject.id, title, content, color);
+        createdOrUpdatedNote = await api.createNote(selectedProject.id, title, content, color);
+
+        // If note was created from a node, create automatic link
+        if (noteSourceNodeId) {
+          const noteNodeId = `note_${createdOrUpdatedNote.id}`;
+          await api.createLink(noteNodeId, noteSourceNodeId, 'manual');
+          setNoteSourceNodeId(null); // Clear after linking
+        }
       }
 
       // Refresh everything
@@ -279,11 +288,19 @@ function App() {
 
   const handleAddNote = () => {
     setEditingNote(null);
+    setNoteSourceNodeId(null); // Clear any source node
     setIsNoteModalOpen(true);
   };
 
   const handleEditNote = (note: Note) => {
     setEditingNote(note);
+    setNoteSourceNodeId(null); // Clear source node when editing
+    setIsNoteModalOpen(true);
+  };
+
+  const handleCreateNoteFromNode = (nodeId: string) => {
+    setEditingNote(null); // New note
+    setNoteSourceNodeId(nodeId); // Store source node for linking
     setIsNoteModalOpen(true);
   };
 
@@ -375,6 +392,7 @@ function App() {
                     hiddenTagNames={hiddenTagNames}
                     hiddenPaperIds={hiddenPaperIds}
                     hiddenNoteIds={hiddenNoteIds}
+                    onCreateNoteFromNode={handleCreateNoteFromNode}
                   />
                   {/* Floating Advanced View Panel */}
                   <AdvancedViewPanel
@@ -434,6 +452,7 @@ function App() {
                     onTagsUpdated={handleTagsUpdated}
                     onPDFClick={handlePDFClick}
                     allNodes={graphData.nodes}
+                    onCreateNoteFromNode={handleCreateNoteFromNode}
                   />
                 </div>
               )}

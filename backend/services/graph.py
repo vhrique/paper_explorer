@@ -22,11 +22,13 @@ class GraphService:
         # This places semantically similar content close together
         if len(embeddings) >= 2:
             n_components = min(2, len(embeddings))
-            tsne = TSNE(n_components=n_components, random_state=42, metric='cosine').fit(embeddings_array)
+            perplexity = int(np.sqrt(len(embeddings)))
+            perplexity = max(30, perplexity)
+            tsne = TSNE(n_components=n_components, perplexity=perplexity, random_state=42, metric='cosine').fit(embeddings_array)
             positions_2d = tsne.transform(embeddings_array)
             
-            # Scale positions to reasonable graph coordinates (e.g., -2000 to 2000)
-            scaler = MinMaxScaler(feature_range=(-2000, 2000))
+            # Scale positions to reasonable graph coordinates (e.g., -4000 to 4000)
+            scaler = MinMaxScaler(feature_range=(-4000, 4000))
             positions_2d = scaler.fit_transform(positions_2d)
         else:
             positions_2d = np.array([[0, 0]] * len(embeddings))
