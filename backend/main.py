@@ -222,6 +222,10 @@ def update_paper(paper_id: int, paper_update: PaperUpdate):
         update_fields.append("description = %s")
         params.append(paper_update.description)
         
+    if paper_update.doi is not None:
+        update_fields.append("doi = %s")
+        params.append(paper_update.doi)
+        
     if not update_fields:
         conn.close()
         return dict(existing_paper)
@@ -332,7 +336,16 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     conn.close()
     
     # Process PDF (pass bytes directly)
-    nodes = pdf_processor.process_pdf(io.BytesIO(file_bytes), paper_id)
+    nodes, extracted_doi = pdf_processor.process_pdf(io.BytesIO(file_bytes), paper_id)
+    
+    # If DOI found, update the paper record
+    if extracted_doi:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE papers SET doi = %s WHERE id = %s", (extracted_doi, paper_id))
+        conn.commit()
+        conn.close()
+        print(f"Stored DOI for paper {paper_id}: {extracted_doi}")
     
     # Generate Embeddings
     nodes = embedding_service.generate_embeddings(nodes)
@@ -342,6 +355,7 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     
     if len(valid_nodes) == 0:
         return {"message": "File uploaded but no valid embeddings generated", "paper_id": paper_id, "nodes_count": 0}
+    
     
     # Save to database with pgvector
     nodes_to_insert = []

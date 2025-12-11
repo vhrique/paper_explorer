@@ -2,6 +2,7 @@ import fitz  # PyMuPDF
 import os
 import uuid
 import io
+import re
 from typing import List, Dict, Any
 from .storage import S3StorageService
 
@@ -9,7 +10,7 @@ class PDFProcessor:
     def __init__(self, storage_service: S3StorageService):
         self.storage_service = storage_service
 
-    def process_pdf(self, pdf_path: str, paper_id: int) -> List[Dict[str, Any]]:
+    def process_pdf(self, pdf_path: str, paper_id: int) -> tuple[List[Dict[str, Any]], str]:
         # If pdf_path is a local path (temp file), open it
         # If it's a bytes object, open it directly
         if isinstance(pdf_path, str):
@@ -18,6 +19,16 @@ class PDFProcessor:
             # Assume it's a file-like object or bytes
             doc = fitz.open(stream=pdf_path, filetype="pdf")
         nodes = []
+        extracted_doi = ""
+
+        # Check for DOI on first page
+        if len(doc) > 0:
+            first_page = doc[0]
+            first_page_text = first_page.get_text()
+            doi = self._extract_doi(first_page_text)
+            if doi:
+                print(f"DOI found on first page: {doi}")
+                extracted_doi = doi
 
         for page_num, page in enumerate(doc):
             # Extract Text Blocks
@@ -102,7 +113,7 @@ class PDFProcessor:
                     continue
 
         print(f"Processed PDF: {len([n for n in nodes if n['type'] == 'text'])} text blocks, {len([n for n in nodes if n['type'] == 'image'])} images")
-        return nodes
+        return nodes, extracted_doi
     
     def _split_block_into_paragraphs(self, block, gap_factor=0.5, indent_threshold=8.0):
         """
@@ -179,3 +190,21 @@ class PDFProcessor:
         y1 = max(line["bbox"][3] for line in lines)
         
         return [x0, y0, x1, y1]
+    
+    def _extract_doi(self, text: str) -> str:
+        """
+        Extract DOI from text using regex.
+        
+        Args:
+            text: Text content to search for DOI
+            
+        Returns:
+            DOI string if found, empty string otherwise
+        """
+        # Common DOI regex pattern - matches format like 10.1234/example.article.id
+        doi_pattern = r'\b(10\.\d{4,}/[-._;()/:A-Za-z0-9]+)\b'
+        match = re.search(doi_pattern, text, re.IGNORECASE)
+        
+        if match:
+            return match.group(1)
+        return ""
