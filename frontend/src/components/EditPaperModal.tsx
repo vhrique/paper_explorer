@@ -6,6 +6,7 @@ interface Paper {
     id: number;
     title: string;
     description?: string;
+    doi?: string;
     color: string;
 }
 
@@ -24,6 +25,7 @@ const COLORS = [
 export const EditPaperModal: React.FC<EditPaperModalProps> = ({ paper, isOpen, onClose, onUpdate }) => {
     const [title, setTitle] = useState(paper.title);
     const [description, setDescription] = useState(paper.description || '');
+    const [doi, setDoi] = useState(paper.doi || '');
     const [color, setColor] = useState(paper.color);
     const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -32,6 +34,7 @@ export const EditPaperModal: React.FC<EditPaperModalProps> = ({ paper, isOpen, o
         if (isOpen) {
             setTitle(paper.title);
             setDescription(paper.description || '');
+            setDoi(paper.doi || '');
             setColor(paper.color);
             setError(null);
         }
@@ -43,7 +46,7 @@ export const EditPaperModal: React.FC<EditPaperModalProps> = ({ paper, isOpen, o
         setIsSaving(true);
         setError(null);
         try {
-            await api.updatePaper(paper.id, { title, description, color });
+            await api.updatePaper(paper.id, { title, description, color, doi });
             onUpdate();
             onClose();
         } catch (err) {
@@ -83,6 +86,17 @@ export const EditPaperModal: React.FC<EditPaperModalProps> = ({ paper, isOpen, o
                             onChange={(e) => setDescription(e.target.value)}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all min-h-[80px]"
                             placeholder="Add a description..."
+                        />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">DOI</label>
+                        <input
+                            type="text"
+                            value={doi}
+                            onChange={(e) => setDoi(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm"
+                            placeholder="10.xxxx/xxxxx"
                         />
                     </div>
 

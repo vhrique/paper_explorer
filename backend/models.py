@@ -26,6 +26,7 @@ class Paper(BaseModel):
     title: str
     filename: str
     url: Optional[str] = None
+    doi: Optional[str] = None
     color: str = "#3B82F6"  # Default blue color
     description: Optional[str] = None
     created_at: datetime
@@ -37,6 +38,7 @@ class PaperUpdate(BaseModel):
     title: Optional[str] = None
     color: Optional[str] = None
     description: Optional[str] = None
+    doi: Optional[str] = None
 
 class Node(BaseModel):
     id: str

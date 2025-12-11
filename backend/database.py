@@ -169,6 +169,13 @@ def init_db():
                 conn.commit()
             except psycopg2.errors.DuplicateColumn:
                 conn.rollback()
+
+            # Add doi column to papers if it doesn't exist (migration)
+            try:
+                cursor.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
+                conn.commit()
+            except psycopg2.errors.DuplicateColumn:
+                conn.rollback()
             
             conn.commit()
             conn.close()
