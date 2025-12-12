@@ -9,3 +9,4 @@ numpy
 boto3
 psycopg2-binary
 opentsne
+requests
