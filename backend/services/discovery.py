@@ -36,85 +36,65 @@ class DiscoveryService:
             print("Could not resolve any DOIs to S2 Paper IDs")
             return []
 
-        # 3. Get Recommendations
-        # Ask for more than 10 to allow for re-ranking
+        # 3. Fetch Embeddings for Project Papers (specter_v2)
+        print(paper_ids)
+        print(f"Fetching Specter2 embeddings for {len(paper_ids)} project papers...")
+        project_embeddings_map = self.ss_service.get_embeddings(paper_ids)
+        project_vectors = list(project_embeddings_map.values())
+        print(f"Got {len(project_vectors)} embeddings for project papers")
+
+        if not project_vectors:
+            print("No embeddings found for project papers. Cannot train model.")
+            return []
+
+        # 4. Get Recommendations
         print(f"Requesting recommendations for {len(paper_ids)} papers...")
-        recommendations = self.ss_service.get_recommendations(paper_ids, limit=20)
+        # Get more recommendations to buffer filtering
+        recommendations = self.ss_service.get_recommendations(paper_ids, limit=50)
         print(f"Received {len(recommendations)} recommendations")
         
         if not recommendations:
             return []
 
-        # 4. Generate Embeddings for Recommendations
-        # We process them to generate embeddings (Title + Abstract)
-        print("Generating embeddings for recommendations...")
-        candidate_embeddings = []
+        # 5. Fetch Embeddings for Recommendations (specter_v2)
+        rec_ids = [p['paperId'] for p in recommendations if p.get('paperId')]
+        print(f"Fetching Specter2 embeddings for {len(rec_ids)} recommendations...")
+        rec_embeddings_map = self.ss_service.get_embeddings(rec_ids)
+        
         valid_candidates = []
+        candidate_vectors = []
+        
+        for p in recommendations:
+            pid = p.get('paperId')
+            if pid and pid in rec_embeddings_map:
+                valid_candidates.append(p)
+                candidate_vectors.append(rec_embeddings_map[pid])
+        
+        print(f"Have {len(candidate_vectors)} valid candidates with embeddings")
 
-        for paper in recommendations:
-            title = paper.get('title', '')
-            abstract = paper.get('abstract', '')
-            if not title:
-                continue
-            
-            # Combine title and abstract
-            text = f"{title}. {abstract}" if abstract else title
-            embedding = self.embedding_service.generate_text_embedding(text)
-            
-            if embedding:
-                candidate_embeddings.append(embedding)
-                valid_candidates.append(paper)
-
-        if not candidate_embeddings:
+        if not candidate_vectors:
             return []
 
-        # 5. Train One-Class SVM on Project Nodes
-        # Fetch all text nodes from the project that have embeddings
-        project_nodes = get_nodes_by_project(project_id, include_embeddings=True)
-        
-        # Filter for text nodes with valid embeddings
-        X_train = []
-        for node in project_nodes:
-            embedding = node.get('embedding')
-            if embedding is not None and len(embedding) > 0:
-                 # Ideally we should mostly use "paper abstract" nodes or similar, 
-                 # but our nodes are just chunks of the PDF. Using all of them is a good proxy for "content of interest".
-                X_train.append(embedding)
-
-        print(f"Training SVM with {len(X_train)} samples...")
+        # 6. Train One-Class SVM on Project Embeddings (Specter2)
+        print(f"Training SVM with {len(project_vectors)} samples (Specter2)...")
         scores = []
-        if len(X_train) > 0:
-            try:
-                # Nu is an upper bound on the fraction of training errors and a lower bound of the fraction of support vectors.
-                # Default is 0.5. We might want it lower if we trust our data is consistent.
-                # Gamma 'scale' uses 1 / (n_features * X.var())
-                clf = OneClassSVM(kernel='rbf', gamma='scale', nu=0.1)
-                clf.fit(X_train)
-                
-                # Score candidates
-                # decision_function returns signed distance to the separating hyperplane.
-                # Positive -> in-class (similar). Negative -> out-class (dissimilar).
-                # Higher is better.
-                decision_scores = clf.decision_function(candidate_embeddings)
-                scores = decision_scores.tolist()
-                print("SVM scoring complete.")
-            except Exception as e:
-                print(f"Error training SVM: {e}. Fallback to original order.")
-                # Fallback: fake scores (could be 0)
-                scores = [0] * len(valid_candidates)
-        else:
-            print("No training samples found. Skipping SVM.")
-            # No training data, just return valid candidates in original order
+        try:
+            clf = OneClassSVM(kernel='rbf', gamma='scale', nu=0.1)
+            clf.fit(project_vectors)
+            
+            decision_scores = clf.decision_function(candidate_vectors)
+            scores = decision_scores.tolist()
+            print("SVM scoring complete.")
+        except Exception as e:
+            print(f"Error training SVM: {e}. Fallback to original order.")
             scores = [0] * len(valid_candidates)
 
-        # 6. Rank and Sort
+        # 7. Rank and Sort
         scored_candidates = []
         for i, paper in enumerate(valid_candidates):
             paper['match_score'] = scores[i]
             scored_candidates.append(paper)
         
-        # Sort by score descending
         scored_candidates.sort(key=lambda x: x['match_score'], reverse=True)
         
-        # Return top 10
         return scored_candidates[:10]

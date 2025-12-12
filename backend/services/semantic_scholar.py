@@ -71,4 +71,34 @@ class SemanticScholarService:
             print(f"Error getting recommendations: {e}")
             # Fallback (maybe?): If batch fails, try getting recommendations for the most recent paper?
             # For now just return empty
-            return []
+    def get_embeddings(self, paper_ids: List[str]) -> Dict[str, List[float]]:
+        """
+        Get Specter2 embeddings for a list of paper IDs.
+        Returns a dictionary mapping paperId to embedding vector.
+        """
+        if not paper_ids:
+            return {}
+            
+        url = f"{self.BASE_URL}/graph/v1/paper/batch"
+        params = {"fields": "embedding.specter_v2"}
+        payload = {"ids": paper_ids}
+        
+        try:
+            response = self.session.post(url, json=payload, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            embeddings = {}
+            for item in data:
+                if item and 'paperId' in item:
+                    # Structure: item['embedding']['specter_v2']['vector']
+                    # Or None if not available
+                    emb_data = item.get('embedding')
+                    if emb_data and 'vector' in emb_data:
+                        embeddings[item['paperId']] = emb_data['vector']
+            
+            return embeddings
+        except requests.exceptions.RequestException as e:
+            print(f"Error getting embeddings: {e}")
+            return {}
+

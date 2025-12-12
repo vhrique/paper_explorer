@@ -64,19 +64,17 @@ export function DiscoveryPanel({ projectId }: DiscoveryPanelProps) {
                 </div>
 
                 <div className="flex items-center gap-4">
-                    {!isExpanded && papers.length === 0 && (
-                        <button
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                handleDiscover();
-                            }}
-                            disabled={isLoading}
-                            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                        >
-                            {isLoading ? <Loader2 className="animate-spin" size={16} /> : <Sparkles size={16} />}
-                            Find New Papers
-                        </button>
-                    )}
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            handleDiscover();
+                        }}
+                        disabled={isLoading}
+                        className={`px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2 ${isLoading ? 'cursor-not-allowed' : ''}`}
+                    >
+                        {isLoading ? <Loader2 className="animate-spin" size={16} /> : <Sparkles size={16} />}
+                        {papers.length > 0 ? "Refresh" : "Find New Papers"}
+                    </button>
                     {isExpanded ? <ChevronDown className="text-gray-400" /> : <ChevronUp className="text-gray-400" />}
                 </div>
             </div>
@@ -133,8 +131,8 @@ export function DiscoveryPanel({ projectId }: DiscoveryPanelProps) {
                                         </h3>
                                         <span
                                             className={`text-xs font-bold px-2 py-1 rounded-full whitespace-nowrap ${(paper.match_score || 0) > 0
-                                                    ? 'bg-green-100 text-green-700'
-                                                    : 'bg-gray-100 text-gray-600'
+                                                ? 'bg-green-100 text-green-700'
+                                                : 'bg-gray-100 text-gray-600'
                                                 }`}
                                             title={paper.match_score !== undefined ? `Score: ${paper.match_score.toFixed(3)}` : 'No score'}
                                         >
