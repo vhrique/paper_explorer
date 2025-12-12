@@ -218,5 +218,11 @@ export const api = {
         await axios.delete(`${API_URL}/links/`, {
             params: { source_node_id: sourceNodeId, target_node_id: targetNodeId }
         });
+    },
+
+    // Discovery API
+    discoverPapers: async (projectId: number): Promise<any[]> => {
+        const response = await axios.post(`${API_URL}/projects/${projectId}/discover`);
+        return response.data;
     }
 };

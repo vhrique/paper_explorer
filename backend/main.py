@@ -21,6 +21,8 @@ from services.graph import GraphService
 from services.storage import S3StorageService
 from services.similarity import SimilarityService
 from services.tag_service import TagService
+from services.semantic_scholar import SemanticScholarService
+from services.discovery import DiscoveryService
 
 
 app = FastAPI(title="Paper Explorer API")
@@ -40,6 +42,8 @@ embedding_service = EmbeddingService()
 graph_service = GraphService()
 similarity_service = SimilarityService()
 tag_service = TagService(storage_service)
+semantic_scholar_service = SemanticScholarService()
+discovery_service = DiscoveryService(semantic_scholar_service, embedding_service)
 
 @app.on_event("startup")
 def startup_event():
@@ -726,7 +730,16 @@ def _get_project_papers(project_id: int):
     cursor.execute("SELECT id FROM papers WHERE project_id = %s", (project_id,))
     rows = cursor.fetchall()
     conn.close()
-    return rows
+
+@app.post("/projects/{project_id}/discover")
+def discover_papers(project_id: int):
+    try:
+        recommendations = discovery_service.discover_papers(project_id)
+        return recommendations
+    except Exception as e:
+        print(f"Error discovering papers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 

@@ -6,6 +6,7 @@ import { PDFViewer } from './components/PDFViewer';
 import { AdvancedViewPanel } from './components/AdvancedViewPanel';
 import { TagsPanel } from './components/TagsPanel';
 import NoteModal from './components/NoteModal';
+import { DiscoveryPanel } from './components/DiscoveryPanel';
 
 import { api } from './api';
 import type { Project, GraphData, Node, Note } from './api';
@@ -425,6 +426,8 @@ function App() {
                     hiddenTagNames={hiddenTagNames}
                     onToggleTagVisibility={handleToggleTagVisibility}
                   />
+
+                  <DiscoveryPanel projectId={selectedProject.id} />
 
                   <NoteModal
                     isOpen={isNoteModalOpen}
