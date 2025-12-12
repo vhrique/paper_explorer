@@ -37,7 +37,6 @@ class DiscoveryService:
             return []
 
         # 3. Fetch Embeddings for Project Papers (specter_v2)
-        print(paper_ids)
         print(f"Fetching Specter2 embeddings for {len(paper_ids)} project papers...")
         project_embeddings_map = self.ss_service.get_embeddings(paper_ids)
         project_vectors = list(project_embeddings_map.values())
@@ -50,7 +49,7 @@ class DiscoveryService:
         # 4. Get Recommendations
         print(f"Requesting recommendations for {len(paper_ids)} papers...")
         # Get more recommendations to buffer filtering
-        recommendations = self.ss_service.get_recommendations(paper_ids, limit=100)
+        recommendations = self.ss_service.get_recommendations(paper_ids, limit=500)
         print(f"Received {len(recommendations)} recommendations")
         
         if not recommendations:
@@ -88,15 +87,17 @@ class DiscoveryService:
         try:
             # Linear kernel is often good for high-dimensional text embeddings
             # balanced class weight handles the likely imbalance between #project papers and #recommendations
-            clf = SVC(kernel='rbf', class_weight='balanced')
+            clf = SVC(kernel='linear', class_weight='balanced', probability=True)
             clf.fit(X_train, y_train)
             
             # Score candidates
             # We want to identify which candidates are most similar to the positive class.
             # dense_output=True? decision_function returns signed distance to hyperplane.
             # Higher value = more likely to be class 1 (Positive)
-            decision_scores = clf.decision_function(candidate_vectors)
-            scores = decision_scores.tolist()
+            decision_scores = clf.predict_proba(candidate_vectors)
+            # decision_scores = clf.decision_function(candidate_vectors)
+            print(decision_scores.shape)
+            scores = decision_scores[:,1].tolist()
             print("SVC scoring complete.")
         except Exception as e:
             print(f"Error training SVM: {e}. Fallback to original order.")
