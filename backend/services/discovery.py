@@ -1,6 +1,6 @@
 from typing import List, Dict, Optional
 import numpy as np
-from sklearn.svm import OneClassSVM
+from sklearn.svm import SVC
 from database import get_nodes_by_project, get_db_connection
 from services.semantic_scholar import SemanticScholarService
 from services.embedding import EmbeddingService
@@ -50,7 +50,7 @@ class DiscoveryService:
         # 4. Get Recommendations
         print(f"Requesting recommendations for {len(paper_ids)} papers...")
         # Get more recommendations to buffer filtering
-        recommendations = self.ss_service.get_recommendations(paper_ids, limit=50)
+        recommendations = self.ss_service.get_recommendations(paper_ids, limit=100)
         print(f"Received {len(recommendations)} recommendations")
         
         if not recommendations:
@@ -75,18 +75,32 @@ class DiscoveryService:
         if not candidate_vectors:
             return []
 
-        # 6. Train One-Class SVM on Project Embeddings (Specter2)
-        print(f"Training SVM with {len(project_vectors)} samples (Specter2)...")
+        # 6. Train SVC on Project vs Recommendations
+        print(f"Training SVC with {len(project_vectors)} positives and {len(candidate_vectors)} negatives...")
+        
+        # Prepare training data
+        # Positive class: Project vectors (1)
+        # Negative class: Candidate vectors (0) - we treat recommendations as "background" to find the most "positive-like" ones
+        X_train = project_vectors + candidate_vectors
+        y_train = [1] * len(project_vectors) + [0] * len(candidate_vectors)
+        
         scores = []
         try:
-            clf = OneClassSVM(kernel='rbf', gamma='scale', nu=0.1)
-            clf.fit(project_vectors)
+            # Linear kernel is often good for high-dimensional text embeddings
+            # balanced class weight handles the likely imbalance between #project papers and #recommendations
+            clf = SVC(kernel='rbf', class_weight='balanced')
+            clf.fit(X_train, y_train)
             
+            # Score candidates
+            # We want to identify which candidates are most similar to the positive class.
+            # dense_output=True? decision_function returns signed distance to hyperplane.
+            # Higher value = more likely to be class 1 (Positive)
             decision_scores = clf.decision_function(candidate_vectors)
             scores = decision_scores.tolist()
-            print("SVM scoring complete.")
+            print("SVC scoring complete.")
         except Exception as e:
             print(f"Error training SVM: {e}. Fallback to original order.")
+            # Fallback: fake scores (could be 0)
             scores = [0] * len(valid_candidates)
 
         # 7. Rank and Sort
