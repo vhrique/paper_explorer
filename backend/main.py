@@ -894,6 +894,13 @@ def create_note(project_id: int, note: NoteCreate):
     
     insert_nodes([node_to_insert])
     
+    # 4. Compute tag scores for the new note (if models exist)
+    try:
+        tag_service.compute_tag_scores(project_id, node_ids=[chroma_id])
+    except Exception as e:
+        # It's okay if this fails (e.g. no models trained yet)
+        print(f"Could not compute tag scores for new note: {e}")
+    
     return dict(new_note)
 
 @app.get("/projects/{project_id}/notes/", response_model=List[Note])
@@ -965,6 +972,13 @@ def update_note(note_id: int, note_update: NoteUpdate):
                 updates['embedding'] = new_embedding
             
             update_node_metadata(chroma_id, updates)
+            
+            # Compute tag scores for the updated note (if models exist)
+            try:
+                tag_service.compute_tag_scores(existing_note['project_id'], node_ids=[chroma_id])
+            except Exception as e:
+                print(f"Could not compute tag scores for updated note: {e}")
+
         except Exception as e:
             print(f"Error updating node for note: {e}")
             

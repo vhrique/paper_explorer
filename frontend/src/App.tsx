@@ -272,11 +272,8 @@ function App() {
       // Refresh everything
       setSidebarRefreshTrigger(prev => prev + 1);
 
-      // If useNewEmbeddings is enabled, recompute embeddings first
-      if (useNewEmbeddings) {
-        console.log('Recomputing new embeddings after note save...');
-        await api.computeNewEmbeddings(selectedProject.id, useGlobalContext);
-      }
+      // We no longer need to manually recompute embeddings here because 
+      // the backend now handles single-node score computation on create/update.
 
       await handleRefreshView();
 
