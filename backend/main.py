@@ -1017,7 +1017,7 @@ def delete_note(note_id: int):
     return {"message": "Note deleted successfully"}
 
 @app.get("/notes/{note_id}/similar", response_model=List[dict])
-def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = False):
+def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = False):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     
@@ -1102,6 +1102,19 @@ def get_similar_nodes(note_id: int, limit: int = 20, use_new_embeddings: bool = 
         limit=limit + 1,  # +1 to account for the note itself
         use_new_embeddings=use_new_embeddings
     )
+    
+    # NEW: Rerank results if we have query text (note content)
+    # We only rerank if we have enough results and not using new embeddings (unless we want to rerank those too?)
+    # Usually reranking is good regardless of initial retrieval method if we have text.
+    if note.get('content') and len(similar_results) > 0:
+        try:
+            similar_results = similarity_service.rerank_results(
+                query_text=note['content'],
+                results=similar_results,
+                top_k=limit + 1
+            )
+        except Exception as e:
+            print(f"Reranking failed: {e}")
     
     # Build response
     similar_nodes = []

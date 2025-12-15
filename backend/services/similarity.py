@@ -8,6 +8,18 @@ class SimilarityService:
     Service for computing similarity between nodes based on embeddings.
     Supports both original and tag-based (new) embeddings.
     """
+    
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        """
+        Initialize the similarity service with a cross-encoder for re-ranking.
+        """
+        try:
+            from sentence_transformers import CrossEncoder
+            self.cross_encoder = CrossEncoder(model_name)
+            print(f"SimilarityService initialized with CrossEncoder: {model_name}")
+        except Exception as e:
+            print(f"Failed to initialize CrossEncoder: {e}")
+            self.cross_encoder = None
 
     def find_similar_nodes(
         self,
@@ -101,6 +113,58 @@ class SimilarityService:
         Returns:
             Re-ranked list of (node_id, score, metadata) tuples
         """
-        # TODO: Implement cross-encoder re-ranking
-        # For now, just return the original results
-        return results[:top_k]
+        if self.cross_encoder is None:
+            print("CrossEncoder not initialized, skipping reranking")
+            return results[:top_k]
+            
+        if not results:
+            return []
+            
+        # Prepare pairs for cross-encoder
+        pairs = []
+        valid_indices = []
+        
+        for i, (node_id, score, metadata) in enumerate(results):
+            # Extract text content from metadata
+            # 'content' field might contain file path for images, or text for text nodes
+            # 'document' was passed in finding similar nodes but that structure is lost in return type
+            # We need to rely on metadata passed in
+            
+            # Check if we have valid text content to rerank
+            text_content = metadata.get('content', '') or metadata.get('description', '') or metadata.get('title', '')
+            
+            # If it's an image, we might not have good text to rerank against unless we have captions/OCR
+            # For now, let's skip empty content or try to use what we have
+            
+            if not text_content:
+                continue
+                
+            pairs.append([query_text, text_content])
+            valid_indices.append(i)
+            
+        if not pairs:
+            return results[:top_k]
+            
+        try:
+            # Predict scores
+            cross_scores = self.cross_encoder.predict(pairs)
+            
+            # Combine scores with results
+            reranked_results = []
+            for idx, score in zip(valid_indices, cross_scores):
+                original_result = results[idx]
+                # Update score with cross-encoder score
+                # Note: Cross-encoder scores are not bounded to [0,1] like cosine similarity
+                reranked_results.append((original_result[0], float(score), original_result[2]))
+            
+            # Sort by new score (descending)
+            reranked_results.sort(key=lambda x: x[1], reverse=True)
+            
+            # Log top 3 changes for debugging/verification
+            print(f"Reranking complete. Top 3 scores: {[r[1] for r in reranked_results[:3]]}")
+            
+            return reranked_results[:top_k]
+            
+        except Exception as e:
+            print(f"Error during reranking: {e}")
+            return results[:top_k]
