@@ -104,7 +104,7 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
     }
 
     return (
-        <div className="fixed top-20 right-4 w-96 max-h-[calc(100vh-6rem)] bg-white/95 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-200 z-10 flex flex-col">
+        <div className="fixed top-20 right-4 w-96 max-h-[calc(100vh-14rem)] bg-white/95 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-200 z-10 flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
                 <h2 className="text-lg font-bold text-gray-800">Project Content</h2>
@@ -169,8 +169,8 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
                                                 onTogglePaperVisibility(paper.id);
                                             }}
                                             className={`absolute top-2 right-16 p-1.5 transition-colors opacity-0 group-hover:opacity-100 rounded-lg ${hiddenPaperIds?.has(paper.id)
-                                                    ? 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
-                                                    : 'text-blue-500 hover:text-blue-600 hover:bg-blue-50'
+                                                ? 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                                                : 'text-blue-500 hover:text-blue-600 hover:bg-blue-50'
                                                 }`}
                                             title={hiddenPaperIds?.has(paper.id) ? "Show in graph" : "Hide from graph"}
                                         >
@@ -244,8 +244,8 @@ export const PapersSidebar: React.FC<PapersSidebarProps> = ({
                                                 onToggleNoteVisibility(note.id);
                                             }}
                                             className={`absolute top-2 right-9 p-1.5 transition-colors opacity-0 group-hover:opacity-100 rounded-lg ${hiddenNoteIds?.has(note.id)
-                                                    ? 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
-                                                    : 'text-blue-500 hover:text-blue-600 hover:bg-white/50'
+                                                ? 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+                                                : 'text-blue-500 hover:text-blue-600 hover:bg-white/50'
                                                 }`}
                                             title={hiddenNoteIds?.has(note.id) ? "Show in graph" : "Hide from graph"}
                                         >
