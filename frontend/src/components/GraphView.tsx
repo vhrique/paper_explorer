@@ -406,7 +406,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                     source: edge.source,
                     target: edge.target,
                     type: 'default',  // Use bezier curves for all edges
-                    animated: edge.type === 'sequence',
+                    animated: false,
                     style: {
                         stroke: edgeColor,
                         strokeWidth: strokeWidth,
