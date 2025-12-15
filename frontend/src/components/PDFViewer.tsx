@@ -26,7 +26,34 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const highlightedPageRef = useRef<HTMLDivElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const [pageDimensions, setPageDimensions] = useState<Map<number, { width: number; height: number }>>(new Map());
+
+    // Handle Ctrl + Wheel for zooming
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+
+        const handleWheel = (e: WheelEvent) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                const delta = e.deltaY * -0.001;
+                setScale((prevScale: number) => {
+                    const newScale = Math.min(Math.max(prevScale + delta, 0.5), 3.0);
+                    return newScale;
+                });
+            }
+        };
+
+        // We must use addEventListener with passive: false to be able to preventDefault
+        container.addEventListener('wheel', handleWheel, { passive: false });
+
+        return () => {
+            container.removeEventListener('wheel', handleWheel);
+        };
+    }, [loading]);
 
     // Tag management state
     const [tags, setTags] = useState<Tag[]>([]);
@@ -114,8 +141,8 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
         setTimeout(scrollToHighlight, 100);
     };
 
-    const handleZoomIn = () => setScale(prev => Math.min(prev + 0.2, 3.0));
-    const handleZoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
+    const handleZoomIn = () => setScale(prev => Math.min(prev + 0.1, 3.0));
+    const handleZoomOut = () => setScale(prev => Math.max(prev - 0.1, 0.5));
 
     // Handle clicks on PDF pages to select nodes
     const handlePageClick = (e: React.MouseEvent<HTMLDivElement>, pageNumber: number) => {
@@ -398,7 +425,10 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
             </div >
 
             {/* PDF Content - Scrollable */}
-            < div className="flex-1 overflow-y-auto bg-gray-100 p-4" >
+            <div
+                ref={containerRef}
+                className="flex-1 overflow-y-auto bg-gray-100 p-4"
+            >
                 <div className="flex flex-col items-center gap-4">
                     <Document
                         file={pdfUrl}
