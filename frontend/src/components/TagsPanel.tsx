@@ -112,7 +112,7 @@ export const TagsPanel: React.FC<TagsPanelProps> = ({ projectId, onNodeClick, hi
         return (
             <button
                 onClick={() => setIsExpanded(true)}
-                className="fixed bottom-4 right-4 z-10 p-3 bg-white rounded-lg shadow-lg border border-gray-200 hover:bg-gray-50 transition-colors"
+                className="fixed bottom-20 right-4 z-10 p-3 bg-white rounded-lg shadow-lg border border-gray-200 hover:bg-gray-50 transition-colors"
                 title="Show Tags"
             >
                 <TagIcon size={20} className="text-gray-600" />
@@ -121,7 +121,7 @@ export const TagsPanel: React.FC<TagsPanelProps> = ({ projectId, onNodeClick, hi
     }
 
     return (
-        <div className="fixed bottom-4 right-4 w-100 max-h-[calc(100vh-20rem)] bg-white/95 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-200 z-10 flex flex-col">
+        <div className="fixed bottom-20 right-4 w-100 max-h-[calc(100vh-20rem)] bg-white/95 backdrop-blur-sm rounded-2xl shadow-2xl border border-gray-200 z-10 flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
                 <div className="flex items-center gap-2">
