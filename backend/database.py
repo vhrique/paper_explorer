@@ -49,6 +49,8 @@ def init_db():
                 filename TEXT NOT NULL,
                 color TEXT DEFAULT '#3B82F6',
                 description TEXT,
+                doi TEXT,
+                abstract TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
             )
@@ -84,6 +86,35 @@ def init_db():
                 type TEXT DEFAULT 'manual',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (source_node_id, target_node_id)
+            )
+            ''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS paper_references (
+                id SERIAL PRIMARY KEY,
+                paper_id INTEGER NOT NULL,
+                referenced_doi TEXT,
+                referenced_title TEXT,
+                referenced_authors TEXT,
+                referenced_year INTEGER,
+                source TEXT DEFAULT 'crossref',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (paper_id) REFERENCES papers (id) ON DELETE CASCADE
+            )
+            ''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS paper_citations (
+                id SERIAL PRIMARY KEY,
+                paper_id INTEGER NOT NULL,
+                citing_paper_id TEXT,
+                citing_doi TEXT,
+                citing_title TEXT,
+                citing_authors TEXT,
+                citing_year INTEGER,
+                source TEXT DEFAULT 'semanticscholar',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (paper_id) REFERENCES papers (id) ON DELETE CASCADE
             )
             ''')
 
@@ -173,6 +204,13 @@ def init_db():
             # Add doi column to papers if it doesn't exist (migration)
             try:
                 cursor.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
+                conn.commit()
+            except psycopg2.errors.DuplicateColumn:
+                conn.rollback()
+
+            # Add abstract column to papers if it doesn't exist (migration)
+            try:
+                cursor.execute("ALTER TABLE papers ADD COLUMN abstract TEXT")
                 conn.commit()
             except psycopg2.errors.DuplicateColumn:
                 conn.rollback()

@@ -38,8 +38,8 @@ class TagService:
         X_train_local, Y_train_local, local_tag_names = local_data
         
         # Check if we have enough data
-        has_global = len(X_train_global) > 0 and len(X_train_global) > len(global_tag_names)
-        has_local = len(X_train_local) > 0 and len(X_train_local) > len(local_tag_names)
+        has_global = len(X_train_global) > 0 and len(X_train_global) > len(global_tag_names) and len(global_tag_names) > 1
+        has_local = len(X_train_local) > 0 and len(X_train_local) > len(local_tag_names) and len(local_tag_names) > 1
         
         if not has_global and not has_local:
             raise ValueError("No tagged nodes found. Please assign tags to nodes before training.")
