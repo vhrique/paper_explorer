@@ -23,6 +23,7 @@ from services.similarity import SimilarityService
 from services.tag_service import TagService
 from services.semantic_scholar import SemanticScholarService
 from services.discovery import DiscoveryService
+from services.crossref_service import CrossRefService
 
 
 app = FastAPI(title="Paper Explorer API")
@@ -44,6 +45,7 @@ similarity_service = SimilarityService()
 tag_service = TagService(storage_service)
 semantic_scholar_service = SemanticScholarService()
 discovery_service = DiscoveryService(semantic_scholar_service, embedding_service)
+crossref_service = CrossRefService()
 
 @app.on_event("startup")
 def startup_event():
@@ -251,6 +253,46 @@ def update_paper(paper_id: int, paper_update: PaperUpdate):
         except Exception as e:
             print(f"Error updating node metadata: {e}")
             
+    # If DOI changed/added, fetch metadata
+    if paper_update.doi is not None:
+        doi = paper_update.doi
+        # Run in background or directly? Directly for now as it's a user action
+        # Re-use logic similar to upload (should refactor, but inline for now)
+        try:
+            # Connect specifically for this metadata update
+            meta_conn = get_db_connection()
+            meta_cursor = meta_conn.cursor()
+            
+            # CrossRef
+            metadata = crossref_service.fetch_metadata(doi)
+            if metadata:
+                if metadata.get("abstract"):
+                    meta_cursor.execute("UPDATE papers SET abstract = %s WHERE id = %s", (metadata["abstract"], paper_id))
+                
+                references = metadata.get("references", [])
+                for ref in references:
+                    meta_cursor.execute("""
+                        INSERT INTO paper_references 
+                        (paper_id, referenced_doi, referenced_title, referenced_authors, referenced_year, source)
+                        VALUES (%s, %s, %s, %s, %s, 'crossref')
+                    """, (paper_id, ref.get("doi"), ref.get("title"), str(ref.get("authors")), int(ref["year"]) if ref.get("year") and str(ref["year"]).isdigit() else None))
+            
+            # Semantic Scholar Citations
+            ss_paper_ids = semantic_scholar_service.resolve_dois([doi])
+            if ss_paper_ids:
+                citations = semantic_scholar_service.get_citations(ss_paper_ids[0], limit=50)
+                for cit in citations:
+                     meta_cursor.execute("""
+                        INSERT INTO paper_citations
+                        (paper_id, citing_paper_id, citing_doi, citing_title, citing_authors, citing_year, source)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'semanticscholar')
+                    """, (paper_id, cit.get("paperId"), cit.get("doi"), cit.get("title"), str(cit.get("authors")), cit.get("year")))
+            
+            meta_conn.commit()
+            meta_conn.close()
+        except Exception as e:
+            print(f"Error updating metadata updates: {e}")
+            
     conn.close()
     
     paper = dict(updated_paper)
@@ -342,14 +384,90 @@ def upload_pdf(project_id: int, file: UploadFile = File(...)):
     # Process PDF (pass bytes directly)
     nodes, extracted_doi = pdf_processor.process_pdf(io.BytesIO(file_bytes), paper_id)
     
-    # If DOI found, update the paper record
+    # If DOI found, update the paper record and fetch additional metadata
     if extracted_doi:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # 1. Update DOI
         cursor.execute("UPDATE papers SET doi = %s WHERE id = %s", (extracted_doi, paper_id))
+        
+        # 2. Fetch Metadata & References from CrossRef
+        print(f"Fetching CrossRef metadata for {extracted_doi}...")
+        try:
+            metadata = crossref_service.fetch_metadata(extracted_doi)
+            if metadata:
+                # Update Paper Title/Abstract
+                update_fields = []
+                params = []
+                
+                # Optionally update title if it looks better? keeping original filename-based title might be safer initially,
+                # but let's update abstract for sure.
+                if metadata.get("title"):
+                     # We can update title if we want, but user might have set a custom one?
+                     # Let's simple update title if it is the default filename one?
+                     pass
+
+                if metadata.get("abstract"):
+                    update_fields.append("abstract = %s")
+                    params.append(metadata["abstract"])
+                
+                if update_fields:
+                    params.append(paper_id)
+                    query = f"UPDATE papers SET {', '.join(update_fields)} WHERE id = %s"
+                    cursor.execute(query, tuple(params))
+                    print(f"Updated metadata for paper {paper_id}")
+
+                # Store References (Outgoing)
+                references = metadata.get("references", [])
+                if references:
+                    print(f"Found {len(references)} references")
+                    for ref in references:
+                        cursor.execute("""
+                            INSERT INTO paper_references 
+                            (paper_id, referenced_doi, referenced_title, referenced_authors, referenced_year, source)
+                            VALUES (%s, %s, %s, %s, %s, 'crossref')
+                        """, (
+                            paper_id,
+                            ref.get("doi"),
+                            ref.get("title"),
+                            str(ref.get("authors")) if ref.get("authors") else None,
+                            int(ref["year"]) if ref.get("year") and str(ref["year"]).isdigit() else None
+                        ))
+
+        except Exception as e:
+            print(f"Error fetching CrossRef data: {e}")
+
+        # 3. Fetch Citations (Incoming) from Semantic Scholar
+        print(f"Fetching citations for {extracted_doi}...")
+        try:
+            # First resolve DOI to PaperID
+            ss_paper_ids = semantic_scholar_service.resolve_dois([extracted_doi])
+            if ss_paper_ids:
+                ss_paper_id = ss_paper_ids[0]
+                citations = semantic_scholar_service.get_citations(ss_paper_id, limit=50) # limit to avoid overwhelming
+                
+                if citations:
+                    print(f"Found {len(citations)} citations")
+                    for cit in citations:
+                         cursor.execute("""
+                            INSERT INTO paper_citations
+                            (paper_id, citing_paper_id, citing_doi, citing_title, citing_authors, citing_year, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'semanticscholar')
+                        """, (
+                            paper_id,
+                            cit.get("paperId"),
+                            cit.get("doi"),
+                            cit.get("title"),
+                            str(cit.get("authors")),
+                            cit.get("year")
+                        ))
+        except Exception as e:
+            print(f"Error fetching citations: {e}")
+
         conn.commit()
         conn.close()
-        print(f"Stored DOI for paper {paper_id}: {extracted_doi}")
+        print(f"Stored DOI and metadata for paper {paper_id}: {extracted_doi}")
     
     # Generate Embeddings
     nodes = embedding_service.generate_embeddings(nodes)

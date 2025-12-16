@@ -102,3 +102,38 @@ class SemanticScholarService:
             print(f"Error getting embeddings: {e}")
             return {}
 
+    def get_citations(self, paper_id: str, limit: int = 100) -> List[Dict]:
+        """
+        Get citations (incoming) for a paper.
+        Returns a list of citing papers including title, authors, year, and venue.
+        """
+        if not paper_id:
+            return []
+            
+        url = f"{self.BASE_URL}/graph/v1/paper/{paper_id}/citations"
+        params = {
+            "fields": "title,year,authors,venue,externalIds",
+            "limit": limit
+        }
+        
+        try:
+            response = self.session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            citations = []
+            for item in data.get("data", []):
+                citing_paper = item.get("citingPaper")
+                if citing_paper:
+                    citations.append({
+                        "paperId": citing_paper.get("paperId"),
+                        "title": citing_paper.get("title"),
+                        "year": citing_paper.get("year"),
+                        "authors": citing_paper.get("authors", []),
+                        "doi": citing_paper.get("externalIds", {}).get("DOI")
+                    })
+            return citations
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error getting citations for {paper_id}: {e}")
+            return []
