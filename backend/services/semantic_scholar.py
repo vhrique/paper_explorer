@@ -137,3 +137,49 @@ class SemanticScholarService:
         except requests.exceptions.RequestException as e:
             print(f"Error getting citations for {paper_id}: {e}")
             return []
+
+    def get_papers(self, paper_ids: List[str]) -> List[Dict]:
+        """
+        Get details (metadata + embeddings) for a batch of paper IDs.
+        """
+        if not paper_ids:
+            return []
+            
+        url = f"{self.BASE_URL}/graph/v1/paper/batch"
+        params = {
+            "fields": "title,abstract,year,authors,venue,externalIds,url,embedding.specter_v2"
+        }
+        
+        # Batch by 500 max usually, sticking to sensible chunks if needed, 
+        # but the library/API might handle it? 
+        # S2 API batch size limit is 500 usually (POST).
+        
+        results = []
+        chunk_size = 100
+        for i in range(0, len(paper_ids), chunk_size):
+            chunk = paper_ids[i:i + chunk_size]
+            payload = {"ids": chunk}
+            
+            try:
+                response = self.session.post(url, json=payload, params=params)
+                print(f"Batch fetch response: {response.status_code}")
+                # response.raise_for_status() # Don't raise, just log error and continue for other chunks?
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # data is a list of objects or nulls
+                    for item in data:
+                        if item:
+                            # Flatten embedding for easier use?
+                            # Keep structure compatible with what discovery expects but clean it up
+                            emb = item.get("embedding")
+                            if emb:
+                                item["embedding"] = emb.get("vector")
+                            results.append(item)
+                else:
+                    print(f"Error fetching batch papers: {response.text}")
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Exception fetching batch papers: {e}")
+                
+        return results

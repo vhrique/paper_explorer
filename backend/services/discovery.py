@@ -53,21 +53,83 @@ class DiscoveryService:
         print(f"Received {len(recommendations)} recommendations")
         
         if not recommendations:
+            # We still want to check references/citations even if no recommendations
+            recommendations = []
+
+        # 5. Load Project References & Citations from DB
+        print("Fetching references and citations from database...")
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Get all references (outgoing) for project papers
+        cursor.execute("""
+            SELECT pr.referenced_doi, pr.referenced_title 
+            FROM paper_references pr
+            JOIN papers p ON pr.paper_id = p.id
+            WHERE p.project_id = %s AND pr.referenced_doi IS NOT NULL
+        """, (project_id,))
+        db_references = cursor.fetchall()
+        
+        # Get all citations (incoming) for project papers
+        cursor.execute("""
+            SELECT pc.citing_paper_id, pc.citing_doi, pc.citing_title
+            FROM paper_citations pc
+            JOIN papers p ON pc.paper_id = p.id
+            WHERE p.project_id = %s
+        """, (project_id,))
+        db_citations = cursor.fetchall()
+        
+        conn.close()
+        
+        print(f"Found {len(db_references)} references and {len(db_citations)} citations in DB")
+        
+        # 6. Consolidate Candidates
+        candidate_ids = set()
+        
+        # Add Recommendations
+        for p in recommendations:
+            if p.get('paperId'):
+                candidate_ids.add(p['paperId'])
+                
+        # Add Citations (we prefer paperId if available)
+        citation_dois = []
+        for c in db_citations:
+            if c['citing_paper_id']:
+                candidate_ids.add(c['citing_paper_id'])
+            elif c['citing_doi']:
+                citation_dois.append(c['citing_doi'])
+                
+        # Add References (mostly DOIs)
+        reference_dois = [r['referenced_doi'] for r in db_references if r['referenced_doi']]
+        
+        # Resolve any DOIs (from refs or citations that lacked paperId)
+        dois_to_resolve = list(set(citation_dois + reference_dois))
+        if dois_to_resolve:
+            print(f"Resolving {len(dois_to_resolve)} DOIs for refs/citations...")
+            resolved_ids = self.ss_service.resolve_dois(dois_to_resolve)
+            candidate_ids.update(resolved_ids)
+            
+        # Exclude papers already in the project
+        project_ids_set = set(paper_ids)
+        candidate_ids.difference_update(project_ids_set) # Remove existing
+        
+        if not candidate_ids:
+            print("No candidates found after filtering.")
             return []
 
-        # 5. Fetch Embeddings for Recommendations (specter_v2)
-        rec_ids = [p['paperId'] for p in recommendations if p.get('paperId')]
-        print(f"Fetching Specter2 embeddings for {len(rec_ids)} recommendations...")
-        rec_embeddings_map = self.ss_service.get_embeddings(rec_ids)
+        print(f"Fetching details for {len(candidate_ids)} candidates...")
+        # Fetch details + embeddings for ALL candidates in batch
+        # Convert set to list
+        all_candidates_data = self.ss_service.get_papers(list(candidate_ids))
         
         valid_candidates = []
         candidate_vectors = []
         
-        for p in recommendations:
-            pid = p.get('paperId')
-            if pid and pid in rec_embeddings_map:
+        for p in all_candidates_data:
+            # Must have embedding to be ranked
+            if p.get('embedding'):
                 valid_candidates.append(p)
-                candidate_vectors.append(rec_embeddings_map[pid])
+                candidate_vectors.append(p['embedding'])
         
         print(f"Have {len(candidate_vectors)} valid candidates with embeddings")
 
