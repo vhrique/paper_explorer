@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import numpy as np
 from sklearn.svm import SVC
 from database import get_nodes_by_project, get_db_connection
@@ -6,10 +6,190 @@ from services.semantic_scholar import SemanticScholarService
 from services.embedding import EmbeddingService
 import psycopg2.extras
 
+from services.graph import GraphService
+
 class DiscoveryService:
-    def __init__(self, semantic_scholar_service: SemanticScholarService, embedding_service: EmbeddingService):
+    def __init__(self, semantic_scholar_service: SemanticScholarService, embedding_service: EmbeddingService, graph_service: GraphService):
         self.ss_service = semantic_scholar_service
         self.embedding_service = embedding_service
+        self.graph_service = graph_service
+
+    def get_discovery_context(self, project_id: int) -> Dict[str, Any]:
+        """
+        Build a context graph for the project including papers, references, and citations.
+        Fetches embeddings for ALL nodes to provide a semantic layout.
+        """
+        print(f"Building context graph for project {project_id}")
+        
+        # 1. Fetch Project Papers
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id, title, doi, color, filename FROM papers WHERE project_id = %s", (project_id,))
+        project_papers = cursor.fetchall()
+        
+        if not project_papers:
+            conn.close()
+            return {"nodes": [], "edges": []}
+
+        project_paper_ids_map = {p['id']: p for p in project_papers}
+        # We need S2 IDs for project papers. resolve DOIs.
+        project_dois = [p['doi'] for p in project_papers if p['doi']]
+        
+        # 2. Fetch References and Citations from DB
+        # Get all references (outgoing)
+        cursor.execute("""
+            SELECT pr.paper_id, pr.referenced_doi, pr.referenced_title 
+            FROM paper_references pr
+            JOIN papers p ON pr.paper_id = p.id
+            WHERE p.project_id = %s AND pr.referenced_doi IS NOT NULL
+        """, (project_id,))
+        db_references = cursor.fetchall()
+        
+        # Get all citations (incoming)
+        cursor.execute("""
+            SELECT pc.paper_id, pc.citing_paper_id, pc.citing_doi, pc.citing_title
+            FROM paper_citations pc
+            JOIN papers p ON pc.paper_id = p.id
+            WHERE p.project_id = %s
+        """, (project_id,))
+        db_citations = cursor.fetchall()
+        conn.close()
+        
+        # 3. Resolve IDs and Collect DOIs
+        papers_to_fetch = set()
+        
+        # Project papers (need to resolve DOIs to S2 IDs)
+        papers_to_fetch.update(project_dois)
+        
+        # References (DOIs)
+        for r in db_references:
+            if r['referenced_doi']:
+                papers_to_fetch.add(r['referenced_doi'])
+                
+        # Citations (S2 ID or DOI)
+        for c in db_citations:
+            if c['citing_paper_id']:
+                papers_to_fetch.add(c['citing_paper_id'])
+            elif c['citing_doi']:
+                papers_to_fetch.add(c['citing_doi'])
+
+        # Prepare list of IDs for S2 (S2 IDs and DOIs prefixed)
+        final_ids_to_fetch = list(papers_to_fetch)
+                 
+        if not final_ids_to_fetch:
+            print("No external papers to fetch.")
+            return {"nodes": [], "edges": []} # Should at least return project papers if we can't find others?
+
+        # 4. Fetch Details & Embeddings
+        print(f"Fetching details/embeddings for {len(final_ids_to_fetch)} papers/DOIs...")
+        s2_data = self.ss_service.get_papers(final_ids_to_fetch)
+        
+        # Map S2 ID (and DOI) to data
+        # We need to robustly map back. The result objects have 'paperId' and 'externalIds.DOI'
+        paper_lookup = {}
+        for p in s2_data:
+            if p.get('paperId'):
+                paper_lookup[p['paperId']] = p
+            if p.get('externalIds') and p.get('externalIds').get('DOI'):
+                doi = p['externalIds']['DOI'].lower()
+                paper_lookup[doi] = p
+
+        # 5. Build Graph Nodes & Edges
+        graph_nodes = []
+        graph_edges = []
+        added_node_ids = set()
+        
+        def add_node(s2_paper, role, project_paper_color=None, db_id=None):
+            if not s2_paper: return
+            pid = s2_paper['paperId']
+            if pid in added_node_ids: return pid
+            
+            node = {
+                "id": pid,
+                "type": role, # 'project', 'reference', 'citation'
+                "title": s2_paper.get('title', 'Untitled'),
+                "abstract": s2_paper.get('abstract'),
+                "year": s2_paper.get('year'),
+                "authors": [a['name'] for a in s2_paper.get('authors', [])],
+                "url": s2_paper.get('url'),
+                "paper_color": project_paper_color or ("#22c55e" if role == 'reference' else "#f97316"), # Green/Orange
+                "embedding": s2_paper.get('embedding'),
+                "db_id": db_id 
+            }
+            if role == 'project':
+                node['paper_color'] = "#3b82f6" # Force blue for project papers
+            
+            graph_nodes.append(node)
+            added_node_ids.add(pid)
+            return pid
+
+        # Add Project Papers
+        # We iterate our DB papers and find their S2 data
+        project_s2_ids = {} # db_id -> s2_id
+        
+        for pp in project_papers:
+            s2_p = None
+            if pp['doi']:
+                s2_p = paper_lookup.get(pp['doi'].lower())
+            
+            # If we couldn't resolve via DOI, we might be out of luck for embeddings unless we search by title (too slow)
+            # But let's proceed with what we have.
+            if s2_p:
+                pid = add_node(s2_p, 'project', project_paper_color=pp.get('color'), db_id=pp['id'])
+                if pid:
+                    project_s2_ids[pp['id']] = pid
+            else:
+                print(f"Warning: Could not resolve S2 ID for project paper {pp['id']} ({pp['doi']})")
+        
+        # Add References
+        for ref in db_references:
+            source_db_id = ref['paper_id']
+            if source_db_id not in project_s2_ids: continue
+            
+            source_s2_id = project_s2_ids[source_db_id]
+            
+            target_s2_p = None
+            if ref['referenced_doi']:
+                target_s2_p = paper_lookup.get(ref['referenced_doi'].lower())
+            
+            if target_s2_p:
+                target_pid = add_node(target_s2_p, 'reference')
+                if target_pid:
+                    graph_edges.append({
+                        "source": source_s2_id,
+                        "target": target_pid,
+                        "type": "reference",
+                        "weight": 1
+                    })
+
+        # Add Citations
+        for cit in db_citations:
+            target_db_id = cit['paper_id']
+            if target_db_id not in project_s2_ids: continue
+            
+            target_s2_id = project_s2_ids[target_db_id]
+            
+            source_s2_p = None
+            if cit['citing_paper_id']:
+                 source_s2_p = paper_lookup.get(cit['citing_paper_id'])
+            elif cit['citing_doi']:
+                 source_s2_p = paper_lookup.get(cit['citing_doi'].lower())
+            
+            if source_s2_p:
+                source_pid = add_node(source_s2_p, 'citation')
+                if source_pid:
+                    # Citation: Source -> Project Paper
+                    graph_edges.append({
+                        "source": source_pid,
+                        "target": target_s2_id,
+                        "type": "citation",
+                        "weight": 1
+                    })
+
+        print(f"Constructed context nodes: {len(graph_nodes)}, edges: {len(graph_edges)}")
+        
+        # 6. Apply Layout
+        return self.graph_service.build_citation_graph(graph_nodes, graph_edges)
 
     def discover_papers(self, project_id: int) -> List[Dict]:
         """

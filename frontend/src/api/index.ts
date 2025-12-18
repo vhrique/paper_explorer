@@ -32,17 +32,23 @@ export interface Note {
 
 export interface Node {
     id: string;
-    type: 'text' | 'image' | 'note';
-    content: string;
-    page_number: number;
-    bbox: number[];
-    paper_id: number;
+    type: 'text' | 'image' | 'note' | 'project' | 'reference' | 'citation';
+    content?: string; // Content is optional for paper nodes
+    page_number?: number; // Optional for paper nodes
+    bbox?: number[]; // Optional
+    paper_id?: number | string; // paper_id might be string for S2 nodes? Actually paper_id number is for DB. S2 ID is string.
     paper_color?: string;
     position?: { x: number; y: number };  // PCA-based position from backend
     has_tags?: boolean;  // Whether this node has any tags
     tag_scores?: Record<string, number>; // SVM decision function scores for tags
     note_id?: string; // ID of the note if type is 'note'
-    title?: string; // Title for note
+    title?: string; // Title for note or paper
+
+    // Fields for Discovery Context Graph
+    year?: number;
+    authors?: string[];
+    url?: string;
+    abstract?: string;
 }
 
 export interface Edge {
@@ -223,6 +229,11 @@ export const api = {
     // Discovery API
     discoverPapers: async (projectId: number): Promise<any[]> => {
         const response = await axios.post(`${API_URL}/projects/${projectId}/discover`);
+        return response.data;
+    },
+
+    getDiscoveryContext: async (projectId: number): Promise<GraphData> => {
+        const response = await axios.get(`${API_URL}/projects/${projectId}/discovery/context`);
         return response.data;
     }
 };
