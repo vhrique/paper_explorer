@@ -44,12 +44,16 @@ graph_service = GraphService()
 similarity_service = SimilarityService()
 tag_service = TagService(storage_service)
 semantic_scholar_service = SemanticScholarService()
-discovery_service = DiscoveryService(semantic_scholar_service, embedding_service)
+discovery_service = DiscoveryService(semantic_scholar_service, embedding_service, graph_service)
 crossref_service = CrossRefService()
 
 @app.on_event("startup")
 def startup_event():
     init_db()
+
+@app.get("/projects/{project_id}/discovery/context")
+def get_discovery_context_endpoint(project_id: int):
+    return discovery_service.get_discovery_context(project_id)
 
 @app.post("/projects/", response_model=Project)
 def create_project(project: ProjectCreate):
