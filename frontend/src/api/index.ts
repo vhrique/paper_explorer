@@ -89,6 +89,11 @@ export const api = {
         return response.data;
     },
 
+    updateProject: async (projectId: number, updates: { name?: string; description?: string }): Promise<Project> => {
+        const response = await axios.patch(`${API_URL}/projects/${projectId}`, updates);
+        return response.data;
+    },
+
     uploadPDF: async (projectId: number, file: File): Promise<any> => {
         const formData = new FormData();
         formData.append('file', file);

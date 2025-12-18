@@ -6,11 +6,12 @@ import { PDFViewer } from './components/PDFViewer';
 import { AdvancedViewPanel } from './components/AdvancedViewPanel';
 import { TagsPanel } from './components/TagsPanel';
 import NoteModal from './components/NoteModal';
+import EditProjectModal from './components/EditProjectModal';
 import { DiscoveryPanel } from './components/DiscoveryPanel';
 
 import { api } from './api';
 import type { Project, GraphData, Node, Note } from './api';
-import { ArrowLeft, Network } from 'lucide-react';
+import { ArrowLeft, Network, Edit2 } from 'lucide-react';
 
 type View = 'projects' | 'graph';
 
@@ -25,6 +26,9 @@ function App() {
   const [hiddenTagNames, setHiddenTagNames] = useState<Set<string>>(new Set());
   const [hiddenPaperIds, setHiddenPaperIds] = useState<Set<number>>(new Set());
   const [hiddenNoteIds, setHiddenNoteIds] = useState<Set<number>>(new Set());
+
+  // Editing Project State
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
 
   // Reset hidden tags, papers, and notes when project changes
   useEffect(() => {
@@ -324,6 +328,11 @@ function App() {
     }
   };
 
+  const handleProjectUpdated = (updatedProject: Project) => {
+    setSelectedProject(updatedProject);
+    setEditingProject(null);
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
       {/* Header */}
@@ -348,7 +357,15 @@ function App() {
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <p className="text-sm text-gray-500">Current Project</p>
-                  <p className="font-semibold text-gray-800">{selectedProject.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-semibold text-gray-800">{selectedProject.name}</p>
+                    <button
+                      onClick={() => setEditingProject(selectedProject)}
+                      className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-blue-600 transition-colors"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -461,6 +478,14 @@ function App() {
         )}
       </main>
 
+      {editingProject && (
+        <EditProjectModal
+          isOpen={!!editingProject}
+          onClose={() => setEditingProject(null)}
+          onSave={handleProjectUpdated}
+          project={editingProject}
+        />
+      )}
     </div>
   );
 }
