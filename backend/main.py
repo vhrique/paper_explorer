@@ -114,6 +114,12 @@ def delete_project(project_id: int):
                 "DELETE FROM node_tags WHERE node_id = ANY(%s)",
                 (node_ids,)
             )
+
+            # Delete all links involving nodes in this project
+            cursor.execute(
+                "DELETE FROM links WHERE source_node_id = ANY(%s) OR target_node_id = ANY(%s)",
+                (node_ids, node_ids)
+            )
         
         # Delete the project (cascade will handle papers, nodes, notes, local tags, and svm_models)
         cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
