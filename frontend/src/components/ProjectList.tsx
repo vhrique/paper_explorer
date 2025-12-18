@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import type { Project } from '../api';
-import { Plus, FolderOpen, Trash2 } from 'lucide-react';
+import { Plus, FolderOpen, Trash2, Edit2 } from 'lucide-react';
+import EditProjectModal from './EditProjectModal';
 
 interface ProjectListProps {
     onSelectProject: (project: Project) => void;
@@ -13,6 +14,7 @@ export const ProjectList: React.FC<ProjectListProps> = ({ onSelectProject }) => 
     const [isCreating, setIsCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [editingProject, setEditingProject] = useState<Project | null>(null);
 
     useEffect(() => {
         loadProjects();
@@ -59,6 +61,16 @@ export const ProjectList: React.FC<ProjectListProps> = ({ onSelectProject }) => 
             console.error("Failed to delete project", error);
             alert("Failed to delete project. Please try again.");
         }
+    };
+
+    const handleEditProject = (project: Project, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingProject(project);
+    };
+
+    const handleProjectUpdated = (updatedProject: Project) => {
+        setProjects(projects.map(p => p.id === updatedProject.id ? updatedProject : p));
+        setEditingProject(null);
     };
 
     return (
@@ -120,13 +132,22 @@ export const ProjectList: React.FC<ProjectListProps> = ({ onSelectProject }) => 
                         onClick={() => onSelectProject(project)}
                         className="group p-6 bg-white rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-all cursor-pointer hover:border-blue-200 relative"
                     >
-                        <button
-                            onClick={(e) => handleDeleteProject(project.id, project.name, e)}
-                            className="absolute top-4 right-4 p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                            title="Delete project"
-                        >
-                            <Trash2 size={18} />
-                        </button>
+                        <div className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                                onClick={(e) => handleEditProject(project, e)}
+                                className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                title="Edit project"
+                            >
+                                <Edit2 size={18} />
+                            </button>
+                            <button
+                                onClick={(e) => handleDeleteProject(project.id, project.name, e)}
+                                className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                title="Delete project"
+                            >
+                                <Trash2 size={18} />
+                            </button>
+                        </div>
 
                         <div className="flex items-start justify-between mb-4">
                             <div className="p-3 bg-blue-50 text-blue-600 rounded-lg group-hover:bg-blue-100 transition-colors">
@@ -136,13 +157,22 @@ export const ProjectList: React.FC<ProjectListProps> = ({ onSelectProject }) => 
                                 {new Date(project.created_at).toLocaleDateString()}
                             </span>
                         </div>
-                        <h3 className="text-lg font-semibold text-gray-800 mb-2">{project.name}</h3>
+                        <h3 className="text-lg font-semibold text-gray-800 mb-2 pr-16">{project.name}</h3>
                         <p className="text-sm text-gray-500 line-clamp-2">
                             {project.description || "No description"}
                         </p>
                     </div>
                 ))}
             </div>
+
+            {editingProject && (
+                <EditProjectModal
+                    isOpen={!!editingProject}
+                    onClose={() => setEditingProject(null)}
+                    onSave={handleProjectUpdated}
+                    project={editingProject}
+                />
+            )}
         </div>
     );
 };

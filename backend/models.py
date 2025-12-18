@@ -16,6 +16,10 @@ class Project(ProjectBase):
     class Config:
         from_attributes = True
 
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
 class PaperBase(BaseModel):
     title: str
     filename: str

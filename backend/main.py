@@ -12,7 +12,7 @@ from typing import List
 from database import (init_db, get_db_connection, insert_nodes, get_nodes_by_project, 
                      get_nodes_by_ids, get_nodes_by_paper, update_node_metadata, 
                      update_nodes_by_ids, delete_nodes_by_paper, delete_nodes_by_project, similarity_search)
-from models import (ProjectCreate, Project, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
+from models import (ProjectCreate, Project, ProjectUpdate, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
                     NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, 
                     NoteCreate, NoteUpdate, Link, LinkCreate, TrainModelRequest, TrainModelResponse)
 from services.pdf_processor import PDFProcessor
@@ -81,6 +81,45 @@ def list_projects():
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+@app.patch("/projects/{project_id}", response_model=Project)
+def update_project(project_id: int, project_update: ProjectUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # Check if project exists
+    cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
+    existing_project = cursor.fetchone()
+    
+    if not existing_project:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Build update query dynamically
+    update_fields = []
+    params = []
+    
+    if project_update.name is not None:
+        update_fields.append("name = %s")
+        params.append(project_update.name)
+        
+    if project_update.description is not None:
+        update_fields.append("description = %s")
+        params.append(project_update.description)
+        
+    if not update_fields:
+        conn.close()
+        return dict(existing_project)
+        
+    params.append(project_id)
+    query = f"UPDATE projects SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
+    
+    cursor.execute(query, tuple(params))
+    updated_project = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    return dict(updated_project)
 
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int):

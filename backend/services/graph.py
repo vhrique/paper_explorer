@@ -113,7 +113,7 @@ class GraphService:
                 perplexity = min(30, max(5, int(np.sqrt(n_samples))))
                 
                 # Use simple initialization if very few points
-                init = 'random' # 'pca' is default but can fail on tiny datasets sometimes
+                init = 'pca' # 'pca' is default but can fail on tiny datasets sometimes
                 
                 tsne = TSNE(
                     n_components=2, 
