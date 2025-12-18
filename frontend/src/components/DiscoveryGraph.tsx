@@ -14,6 +14,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import type { Node as APINode, Edge as APIEdge } from '../api';
 import { PaperCard } from './PaperCard';
+import FloatingEdge from './FloatingEdge';
 
 const NodeComponent = ({ data }: any) => {
     const { title, paper_color, type, year, authors } = data;
@@ -54,9 +55,9 @@ const nodeTypes: NodeTypes = {
     citation: NodeComponent,
 };
 
-interface DiscoveryGraphProps {
-    data: { nodes: APINode[], edges: APIEdge[] };
-}
+const edgeTypes = {
+    floating: FloatingEdge,
+};
 
 export const DiscoveryGraph: React.FC<DiscoveryGraphProps> = ({ data }) => {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -85,7 +86,7 @@ export const DiscoveryGraph: React.FC<DiscoveryGraphProps> = ({ data }) => {
             id: `e-${i}`,
             source: edge.source,
             target: edge.target,
-            type: 'default',
+            type: 'floating',
             animated: edge.type === 'reference', // animate outgoing references? or maybe citations
             style: {
                 stroke: edge.type === 'reference' ? '#22c55e' : (edge.type === 'citation' ? '#f97316' : '#94a3b8'),
@@ -119,6 +120,7 @@ export const DiscoveryGraph: React.FC<DiscoveryGraphProps> = ({ data }) => {
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
                 onNodeClick={onNodeClick}
                 onPaneClick={onPaneClick}
                 fitView

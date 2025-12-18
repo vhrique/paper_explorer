@@ -12,6 +12,7 @@ import type { Node, Edge, NodeTypes, Connection } from 'reactflow';
 import 'reactflow/dist/style.css';
 import type { Node as APINode, Edge as APIEdge } from '../api';
 import { Link2, StickyNote } from 'lucide-react';
+import FloatingEdge from './FloatingEdge';
 
 // Custom Node Components
 const TextNode = ({ data }: any) => {
@@ -193,6 +194,10 @@ const darkenColor = (hex: string, percent: number) => {
     const bb = ((b.toString(16).length === 1) ? "0" + b.toString(16) : b.toString(16));
 
     return "#" + rr + gg + bb;
+};
+
+const edgeTypes = {
+    floating: FloatingEdge,
 };
 
 export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selectedNodeId, onConnect, onDeleteEdge, hiddenTagNames, hiddenPaperIds, hiddenNoteIds, onCreateNoteFromNode }) => {
@@ -405,7 +410,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                     id: `e-${index}`,
                     source: edge.source,
                     target: edge.target,
-                    type: 'default',  // Use bezier curves for all edges
+                    type: 'floating',  // Use floating edges
                     animated: false,
                     style: {
                         stroke: edgeColor,
@@ -549,6 +554,7 @@ export const GraphView: React.FC<GraphViewProps> = ({ data, onNodeClick, selecte
                 onPaneClick={onPaneClick}
                 onMouseMove={handleMouseMove}
                 nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
                 onInit={(instance) => { reactFlowInstance.current = instance; }}
                 fitView
                 fitViewOptions={{ padding: 0.2, duration: 800 }}
