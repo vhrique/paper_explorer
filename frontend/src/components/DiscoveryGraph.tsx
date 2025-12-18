@@ -87,7 +87,7 @@ export const DiscoveryGraph: React.FC<DiscoveryGraphProps> = ({ data }) => {
             source: edge.source,
             target: edge.target,
             type: 'floating',
-            animated: edge.type === 'reference', // animate outgoing references? or maybe citations
+            animated: false, ///edge.type === 'reference', // animate outgoing references? or maybe citations
             style: {
                 stroke: edge.type === 'reference' ? '#22c55e' : (edge.type === 'citation' ? '#f97316' : '#94a3b8'),
                 strokeWidth: 1.5,
