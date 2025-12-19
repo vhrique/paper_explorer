@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { X, ZoomIn, ZoomOut, Loader2, StickyNote } from 'lucide-react';
+import { X, ZoomIn, ZoomOut, Loader2, StickyNote, Download } from 'lucide-react';
 import type { Node, Paper, Tag } from '../api';
 import { api } from '../api';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
@@ -237,7 +237,9 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
             {/* Header */}
             <div className="flex items-center justify-between p-4 border-b border-gray-200 bg-gray-50 flex-shrink-0">
                 <div className="flex-1 min-w-0">
-                    <h3 className="font-bold text-gray-800 truncate">{paper.title}</h3>
+                    <h3 className="font-bold text-gray-800 truncate" title={paper.title}>
+                        {paper.title.length > 60 ? `${paper.title.slice(0, 60)}...` : paper.title}
+                    </h3>
                     <p className="text-sm text-gray-600">
                         Highlighted on page {node.page_number} of {numPages}
                     </p>
@@ -260,6 +262,16 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                     >
                         <ZoomIn size={20} className="text-gray-600" />
                     </button>
+
+                    <a
+                        href={pdfUrl}
+                        download={paper.filename}
+                        className="p-2 hover:bg-gray-200 rounded-lg transition-colors flex items-center justify-center"
+                        title="Download PDF"
+                    >
+                        <Download size={20} className="text-gray-600" />
+                    </a>
+
                     <div className="w-px h-6 bg-gray-300 mx-2" />
                     <button
                         onClick={onClose}
