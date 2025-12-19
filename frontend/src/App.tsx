@@ -308,8 +308,23 @@ function App() {
 
   const handleCreateLink = async (source: string, target: string) => {
     if (!selectedProject) return;
+
+    // Ensure links are directed from Note to Node
+    let finalSource = source;
+    let finalTarget = target;
+
+    // Check if target is a note and source is a standard node
+    const isTargetNote = target.startsWith('note_');
+    const isSourceNote = source.startsWith('note_');
+
+    if (isTargetNote && !isSourceNote) {
+      console.log('Swapping link direction to ensure Note -> Node');
+      finalSource = target;
+      finalTarget = source;
+    }
+
     try {
-      await api.createLink(source, target);
+      await api.createLink(finalSource, finalTarget);
       // Refresh graph to show new link
       await handleRefreshView();
     } catch (error) {
@@ -476,17 +491,14 @@ function App() {
                       (e.target === selectedNode.id && e.source === `note_${editingNote.id}`)
                     ))}
                     onConnectToNote={async (nodeId: string, noteId: number) => {
-
                       if (!selectedProject) return;
-                      try {
-                        // noteId is number, createLink expects "note_{id}" string for target usually?
-                        // Wait, api.createLink signature: (sourceId, targetId, type?)
-                        // We want to link PDF Node (nodeId) -> Note Node ("note_"+noteId)
-                        await api.createLink(nodeId, `note_${noteId}`, 'manual');
-                        await handleRefreshView();
-                      } catch (error) {
-                        console.error('Failed to connect note:', error);
-                      }
+                      // Enforce Note -> Node direction
+                      // nodeId is the PDF node (target), noteId is the Note ID (source)
+                      const noteNodeId = `note_${noteId}`;
+
+                      // Use handleCreateLink to centralize logic, or call API directly with correct order
+                      // Calling handleCreateLink to be safe and use same refresh logic
+                      await handleCreateLink(noteNodeId, nodeId);
                     }}
                   />
 
