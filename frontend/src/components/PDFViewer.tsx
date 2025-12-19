@@ -285,19 +285,9 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
 
             {/* Tags Section */}
             <div className="p-4 border-b border-gray-200 bg-white">
-                <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-xs font-bold text-gray-500 uppercase">Tags</h4>
-                    {!showTagInput && (
-                        <button
-                            onClick={() => setShowTagInput(true)}
-                            className="text-xs text-blue-600 hover:text-blue-700 font-medium"
-                        >
-                            + Add Tag
-                        </button>
-                    )}
-                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <h4 className="text-xs font-bold text-gray-500 uppercase mr-2">Tags</h4>
 
-                <div className="flex flex-wrap gap-2 mb-2">
                     {tags.map(tag => (
                         <span
                             key={tag.id}
@@ -361,6 +351,15 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                             + {name}
                         </button>
                     ))}
+
+                    {!showTagInput && (
+                        <button
+                            onClick={() => setShowTagInput(true)}
+                            className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                        >
+                            + Add Tag
+                        </button>
+                    )}
                 </div>
 
                 {
