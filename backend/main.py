@@ -1231,6 +1231,64 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
         if query_embedding is None:
             raise HTTPException(status_code=404, detail="Note embedding not found")
     
+    
+    # NEW: Fetch connected nodes for context
+    connected_nodes = []
+    try:
+        # Get links where note is source or target
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("""
+            SELECT source_node_id, target_node_id
+            FROM links 
+            WHERE source_node_id = %s OR target_node_id = %s
+        """, (chroma_note_id, chroma_note_id))
+        link_rows = cursor.fetchall()
+        
+        # Extract connected node IDs (excluding the note itself)
+        connected_ids = set()
+        for row in link_rows:
+            if row['source_node_id'] != chroma_note_id:
+                connected_ids.add(row['source_node_id'])
+            if row['target_node_id'] != chroma_note_id:
+                connected_ids.add(row['target_node_id'])
+        
+        if connected_ids:
+            # Fetch connected nodes with embeddings
+            connected_nodes = get_nodes_by_ids(list(connected_ids), include_embeddings=True)
+            print(f"Found {len(connected_nodes)} connected nodes for context")
+            
+    except Exception as e:
+        print(f"Error fetching connected nodes: {e}")
+        # Continue without context if fails
+    
+    # Prepare query embeddings list
+    query_embeddings = []
+    
+    # Add note embedding (primary query)
+    if use_new_embeddings:
+        query_embeddings.append(query_embedding) # already processed above
+    else:
+        query_embeddings.append(query_embedding)
+        
+    # Add connected nodes embeddings
+    for c_node in connected_nodes:
+        if use_new_embeddings:
+             # Try to get tag_scores from node
+            tag_scores_str = c_node.get('tag_scores')
+            if tag_scores_str:
+                try:
+                    import json
+                    tag_scores_dict = json.loads(tag_scores_str)
+                    # Convert to list maintaining consistent order
+                    c_emb = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
+                    query_embeddings.append(c_emb)
+                except Exception:
+                    pass
+        else:
+            c_emb = c_node.get('embedding')
+            if c_emb and len(c_emb) > 0:
+                query_embeddings.append(c_emb)
+
     # Fetch all nodes from the project
     all_nodes = get_nodes_by_project(project_id, include_embeddings=True)
     
@@ -1270,8 +1328,9 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
         })
     
     # Use similarity service to find similar nodes
+    # Pass list of list of floats
     similar_results = similarity_service.find_similar_nodes(
-        query_embedding=query_embedding,
+        query_embeddings=query_embeddings,
         nodes=nodes,
         limit=limit + 1,  # +1 to account for the note itself
         use_new_embeddings=use_new_embeddings
@@ -1280,13 +1339,25 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
     # NEW: Rerank results if we have query text (note content)
     # We only rerank if we have enough results and not using new embeddings (unless we want to rerank those too?)
     # Usually reranking is good regardless of initial retrieval method if we have text.
-    if note.get('content') and len(similar_results) > 0:
+    if len(similar_results) > 0:
+        # Construct query texts: note content + connected nodes content
+        query_texts = []
+        if note.get('content'):
+            query_texts.append(note['content'])
+            
+        for c_node in connected_nodes:
+            # We need to extract text content properly
+            c_text = c_node.get('content')
+            if c_text and isinstance(c_text, str) and len(c_text.strip()) > 0:
+                query_texts.append(c_text)
+        
         try:
-            similar_results = similarity_service.rerank_results(
-                query_text=note['content'],
-                results=similar_results,
-                top_k=limit + 1
-            )
+            if query_texts:
+                similar_results = similarity_service.rerank_results(
+                    query_texts=query_texts,
+                    results=similar_results,
+                    top_k=limit + 1
+                )
         except Exception as e:
             print(f"Reranking failed: {e}")
     
