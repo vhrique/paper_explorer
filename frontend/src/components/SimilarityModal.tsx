@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Link as LinkIcon, FileText, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { X, Link as LinkIcon, FileText, Image as ImageIcon, Loader2, ChevronDown, ChevronRight, StickyNote } from 'lucide-react';
 import { api } from '../api';
 import type { Node } from '../api';
 
@@ -19,6 +19,63 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
     const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
     const [linkedNodeIds, setLinkedNodeIds] = useState<Set<string>>(new Set());
     const [linking, setLinking] = useState(false);
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+    interface Group {
+        title: string;
+        nodes: Node[];
+        color?: string;
+    }
+
+    // Group nodes by paper
+    const groupedNodes = React.useMemo(() => {
+        const groups: Record<string, Group> = {};
+
+        nodes.forEach(node => {
+            let groupId: string;
+            let groupTitle: string;
+            let groupColor: string | undefined;
+
+            if (node.paper_id) {
+                groupId = `paper_${node.paper_id}`;
+                groupTitle = node.paper_title || `Paper ${node.paper_id}`;
+                groupColor = node.paper_color;
+            } else {
+                groupId = 'notes';
+                groupTitle = 'Notes';
+                groupColor = '#FEF3C7'; // Default note color
+            }
+
+            if (!groups[groupId]) {
+                groups[groupId] = { title: groupTitle, nodes: [], color: groupColor };
+            }
+            groups[groupId].nodes.push(node);
+        });
+
+        return groups;
+    }, [nodes]);
+
+    // Initialize all groups as expanded when nodes load
+    useEffect(() => {
+        if (nodes.length > 0) {
+            const allGroupIds = new Set<string>();
+            nodes.forEach(node => {
+                if (node.paper_id) allGroupIds.add(`paper_${node.paper_id}`);
+                else allGroupIds.add('notes');
+            });
+            setExpandedGroups(allGroupIds);
+        }
+    }, [nodes]);
+
+    const toggleGroup = (groupId: string) => {
+        const newExpanded = new Set(expandedGroups);
+        if (newExpanded.has(groupId)) {
+            newExpanded.delete(groupId);
+        } else {
+            newExpanded.add(groupId);
+        }
+        setExpandedGroups(newExpanded);
+    };
 
     useEffect(() => {
         if (isOpen && noteId) {
@@ -166,50 +223,69 @@ export const SimilarityModal: React.FC<SimilarityModalProps> = ({ isOpen, onClos
                             No similar content found.
                         </div>
                     ) : (
-                        <div className="space-y-3">
-                            {nodes.map(node => {
-                                const isLinked = linkedNodeIds.has(node.id);
-                                const isSelected = selectedNodes.has(node.id);
-
-                                // Determine border color style
-                                const borderStyle = isSelected
-                                    ? { borderColor: '#3B82F6', borderWidth: '2px' } // Blue for selected
-                                    : { borderColor: node.paper_color || '#E5E7EB', borderWidth: '2px' }; // Paper color for others
-
-                                return (
-                                    <div
-                                        key={node.id}
-                                        className="bg-white p-4 rounded-lg transition-all"
-                                        style={borderStyle}
+                        <div className="space-y-4">
+                            {Object.entries(groupedNodes).map(([groupId, group]) => (
+                                <div key={groupId} className="border border-gray-200 rounded-lg overflow-hidden bg-white/50">
+                                    <button
+                                        onClick={() => toggleGroup(groupId)}
+                                        className="w-full flex items-center justify-between p-3 bg-white hover:bg-gray-50 transition-colors border-b border-gray-100"
                                     >
-                                        <div className="flex items-start gap-3">
-                                            <div className="pt-1">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={selectedNodes.has(node.id)}
-                                                    onChange={() => handleToggleSelect(node.id)}
-                                                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                                                />
-                                            </div>
-                                            <div className="flex-1 cursor-pointer" onClick={() => onViewNode(node)}>
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    {node.type === 'text' ? <FileText size={16} className="text-gray-500" /> : <ImageIcon size={16} className="text-gray-500" />}
-                                                    <span className="text-xs font-medium text-gray-500 uppercase">{node.type}</span>
-                                                    <span className="text-xs text-gray-400">Page {node.page_number}</span>
-                                                    {isLinked && <span className="text-xs font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded-full">Linked</span>}
-                                                </div>
-                                                {node.type === 'text' ? (
-                                                    <p className="text-sm text-gray-800 line-clamp-3">{node.content}</p>
-                                                ) : (
-                                                    <div className="h-20 w-full bg-gray-100 rounded overflow-hidden">
-                                                        <img src={node.content} alt="Content" className="h-full w-full object-cover" />
-                                                    </div>
-                                                )}
-                                            </div>
+                                        <div className="flex items-center gap-2">
+                                            {expandedGroups.has(groupId) ? <ChevronDown size={18} className="text-gray-500" /> : <ChevronRight size={18} className="text-gray-500" />}
+                                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: group.color || '#E5E7EB' }} />
+                                            <span className="font-semibold text-gray-700 text-sm text-left line-clamp-1">{group.title}</span>
+                                            <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full ml-2">
+                                                {group.nodes.length}
+                                            </span>
                                         </div>
-                                    </div>
-                                );
-                            })}
+                                    </button>
+
+                                    {expandedGroups.has(groupId) && (
+                                        <div className="p-3 space-y-3 bg-gray-50/50">
+                                            {group.nodes.map(node => {
+                                                const isLinked = linkedNodeIds.has(node.id);
+                                                const isSelected = selectedNodes.has(node.id);
+
+                                                return (
+                                                    <div
+                                                        key={node.id}
+                                                        className={`bg-white p-3 rounded-lg transition-all shadow-sm ${isSelected ? 'ring-2 ring-blue-500 ring-offset-1' : 'hover:shadow-md'}`}
+                                                    >
+                                                        <div className="flex items-start gap-3">
+                                                            <div className="pt-1">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={selectedNodes.has(node.id)}
+                                                                    onChange={() => handleToggleSelect(node.id)}
+                                                                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500 cursor-pointer"
+                                                                />
+                                                            </div>
+                                                            <div className="flex-1 cursor-pointer" onClick={() => onViewNode(node)}>
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    {node.type === 'text' ? <FileText size={14} className="text-gray-400" /> :
+                                                                        node.type === 'image' ? <ImageIcon size={14} className="text-gray-400" /> :
+                                                                            <StickyNote size={14} className="text-gray-400" />
+                                                                    }
+                                                                    <span className="text-xs font-medium text-gray-500 uppercase">{node.type}</span>
+                                                                    {node.page_number && <span className="text-xs text-gray-400">Page {node.page_number}</span>}
+                                                                    {isLinked && <span className="text-xs font-bold text-green-600 bg-green-100 px-2 py-0.5 rounded-full">Linked</span>}
+                                                                </div>
+                                                                {node.type === 'text' || node.type === 'note' ? (
+                                                                    <p className="text-sm text-gray-800 line-clamp-3 leading-relaxed">{node.content}</p>
+                                                                ) : (
+                                                                    <div className="h-24 w-full bg-gray-100 rounded overflow-hidden mt-1">
+                                                                        <img src={node.content} alt="Content" className="h-full w-full object-cover" />
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
                         </div>
                     )}
                 </div>

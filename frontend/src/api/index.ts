@@ -37,6 +37,7 @@ export interface Node {
     page_number?: number; // Optional for paper nodes
     bbox?: number[]; // Optional
     paper_id?: number | string; // paper_id might be string for S2 nodes? Actually paper_id number is for DB. S2 ID is string.
+    paper_title?: string;
     paper_color?: string;
     position?: { x: number; y: number };  // PCA-based position from backend
     has_tags?: boolean;  // Whether this node has any tags

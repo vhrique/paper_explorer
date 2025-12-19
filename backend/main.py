@@ -1236,6 +1236,13 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
     
     if not all_nodes:
         return []
+
+    # Fetch papers for title mapping
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cursor.execute("SELECT id, title FROM papers WHERE project_id = %s", (project_id,))
+    paper_map = {row['id']: row['title'] for row in cursor.fetchall()}
+    conn.close()
     
     # Prepare nodes for similarity service
     nodes = []
@@ -1290,6 +1297,11 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
         if node_id == chroma_note_id:
             continue
         
+        # Resolve paper title
+        paper_title = None
+        if metadata.get("paper_id") and metadata.get("paper_id") in paper_map:
+            paper_title = paper_map[metadata.get("paper_id")]
+        
         # Construct node object
         node = {
             "id": node_id,
@@ -1297,6 +1309,7 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
             "content": metadata.get("content", ""),
             "page_number": metadata.get("page_number"),
             "paper_id": metadata.get("paper_id"),
+            "paper_title": paper_title,
             "paper_color": metadata.get("paper_color"),
             "bbox": eval(metadata.get("bbox", "[]")) if metadata.get("bbox") else [],
             "similarity": similarity,
