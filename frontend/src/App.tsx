@@ -470,7 +470,26 @@ function App() {
                     onPDFClick={handlePDFClick}
                     allNodes={graphData.nodes}
                     onCreateNoteFromNode={handleCreateNoteFromNode}
+                    activeNote={editingNote}
+                    isLinked={!!(editingNote && graphData.edges.some(e =>
+                      (e.source === selectedNode.id && e.target === `note_${editingNote.id}`) ||
+                      (e.target === selectedNode.id && e.source === `note_${editingNote.id}`)
+                    ))}
+                    onConnectToNote={async (nodeId: string, noteId: number) => {
+
+                      if (!selectedProject) return;
+                      try {
+                        // noteId is number, createLink expects "note_{id}" string for target usually?
+                        // Wait, api.createLink signature: (sourceId, targetId, type?)
+                        // We want to link PDF Node (nodeId) -> Note Node ("note_"+noteId)
+                        await api.createLink(nodeId, `note_${noteId}`, 'manual');
+                        await handleRefreshView();
+                      } catch (error) {
+                        console.error('Failed to connect note:', error);
+                      }
+                    }}
                   />
+
                 </div>
               )}
             </div>
