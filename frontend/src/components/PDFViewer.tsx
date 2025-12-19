@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { X, ZoomIn, ZoomOut, Loader2, StickyNote, Download } from 'lucide-react';
-import type { Node, Paper, Tag } from '../api';
+import { X, ZoomIn, ZoomOut, Loader2, StickyNote, Download, Link, Check } from 'lucide-react';
+
+import type { Node, Paper, Tag, Note } from '../api';
 import { api } from '../api';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
@@ -17,9 +18,13 @@ interface PDFViewerProps {
     onPDFClick?: (nodeId: string) => void;
     allNodes?: Node[];  // All nodes in the project for hit detection
     onCreateNoteFromNode?: (nodeId: string) => void;
+    activeNote?: Note | null;
+    isLinked?: boolean;
+    onConnectToNote?: (nodeId: string, noteId: number) => void;
 }
 
-export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated, onPDFClick, allNodes, onCreateNoteFromNode }) => {
+export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, onTagsUpdated, onPDFClick, allNodes, onCreateNoteFromNode, activeNote, isLinked = false, onConnectToNote }) => {
+
     const [paper, setPaper] = useState<Paper | null>(null);
     const [numPages, setNumPages] = useState<number>(0);
     const [scale, setScale] = useState<number>(1.0);
@@ -28,6 +33,11 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
     const highlightedPageRef = useRef<HTMLDivElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [pageDimensions, setPageDimensions] = useState<Map<number, { width: number; height: number }>>(new Map());
+
+    // Linking state
+    const [isLinking, setIsLinking] = useState(false);
+    const [showSuccess, setShowSuccess] = useState(false);
+
 
     // Handle Ctrl + Wheel for zooming
     useEffect(() => {
@@ -517,6 +527,57 @@ export const PDFViewer: React.FC<PDFViewerProps> = ({ node, onClose, projectId, 
                                                     <StickyNote size={20} className="text-blue-600" />
                                                 </button>
                                             )}
+                                            {/* Connect to note button - Only show if not linked or showing success */}
+                                            {activeNote && onConnectToNote && (
+                                                <>
+                                                    {showSuccess ? (
+                                                        <div
+                                                            className="absolute px-3 py-2 bg-green-100 text-green-700 rounded-lg shadow-lg flex items-center gap-2 border border-green-200 animate-in fade-in zoom-in duration-300"
+                                                            style={{
+                                                                left: `${(x1 - x0) * scale + x0 * scale + 48}px`,
+                                                                top: `${y0 * scale - 8}px`,
+                                                                zIndex: 20,
+                                                                pointerEvents: 'none',
+                                                            }}
+                                                        >
+                                                            <Check size={16} />
+                                                            <span className="text-xs font-bold">Linked!</span>
+                                                        </div>
+                                                    ) : !isLinked && (
+                                                        <button
+                                                            onClick={async () => {
+                                                                if (isLinking) return;
+                                                                setIsLinking(true);
+                                                                try {
+                                                                    await onConnectToNote(node.id, activeNote.id);
+                                                                    setShowSuccess(true);
+                                                                    setTimeout(() => setShowSuccess(false), 2000);
+                                                                } catch (error) {
+                                                                    console.error('Failed to link', error);
+                                                                } finally {
+                                                                    setIsLinking(false);
+                                                                }
+                                                            }}
+                                                            disabled={isLinking}
+                                                            className="absolute p-2 bg-white rounded-lg shadow-lg hover:bg-blue-50 transition-colors border border-gray-300 hover:border-blue-400 disabled:opacity-70 disabled:cursor-not-allowed"
+                                                            style={{
+                                                                left: `${(x1 - x0) * scale + x0 * scale + 48}px`,
+                                                                top: `${y0 * scale - 8}px`,
+                                                                zIndex: 20,
+                                                                pointerEvents: 'auto',
+                                                            }}
+                                                            title={`Connect to note: ${activeNote.title || 'Untitled'}`}
+                                                        >
+                                                            {isLinking ? (
+                                                                <Loader2 size={20} className="text-blue-600 animate-spin" />
+                                                            ) : (
+                                                                <Link size={20} className="text-blue-600" />
+                                                            )}
+                                                        </button>
+                                                    )}
+                                                </>
+                                            )}
+
                                         </>
                                     )}
                                     {/* Page number label */}
