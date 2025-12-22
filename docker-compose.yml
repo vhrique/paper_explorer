@@ -16,6 +16,7 @@ services:
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin
       - MINIO_BUCKET_NAME=paper-explorer
+      - OLLAMA_BASE_URL=http://ollama:11434
     deploy:
       resources:
         reservations:
@@ -30,6 +31,8 @@ services:
         condition: service_started
       createbuckets:
         condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
     networks:
       - paper-explorer-network
 
@@ -108,9 +111,32 @@ services:
     networks:
       - paper-explorer-network
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: paper-explorer-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - paper-explorer-network
+
 volumes:
   postgres_data:
   minio_data:
+  ollama_data:
 
 networks:
   paper-explorer-network:
