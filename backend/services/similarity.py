@@ -7,19 +7,28 @@ class SimilarityService:
     """
     Service for computing similarity between nodes based on embeddings.
     Supports both original and tag-based (new) embeddings.
+    Includes LLM-based excerpt extraction for improved similarity search.
     """
     
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2", llm_service=None):
         """
         Initialize the similarity service with a cross-encoder for re-ranking.
+        
+        Args:
+            model_name: Cross-encoder model name
+            llm_service: Optional LLM service for excerpt extraction
         """
         try:
-            from sentence_transformers import CrossEncoder
-            self.cross_encoder = CrossEncoder(model_name)
+            # from sentence_transformers import CrossEncoder
+            # self.cross_encoder = CrossEncoder(model_name)
+            self.cross_encoder = None
             print(f"SimilarityService initialized with CrossEncoder: {model_name}")
         except Exception as e:
             print(f"Failed to initialize CrossEncoder: {e}")
             self.cross_encoder = None
+        
+        self.llm_service = llm_service
+        self._excerpt_cache = {}  # Cache for extracted excerpts: (query_hash, paper_id) -> excerpt
 
     def find_similar_nodes(
         self,
@@ -103,11 +112,120 @@ class SimilarityService:
         
         return similarities[:limit]
     
+    def extract_paper_excerpts(
+        self,
+        query_text: str,
+        papers_data: List[Tuple[int, str, str]],  # (paper_id, full_content, title)
+        num_excerpts: int = 3,
+        max_excerpt_length: int = 500
+    ) -> Dict[int, List[str]]:
+        """
+        Extract multiple relevant excerpts from papers using LLM based on query context.
+        
+        Args:
+            query_text: The query context (e.g., note content)
+            papers_data: List of (paper_id, full_content, title) tuples
+            num_excerpts: Number of distinct excerpts to extract per paper
+            max_excerpt_length: Maximum length of each excerpt
+            
+        Returns:
+            Dictionary mapping paper_id to list of extracted excerpts
+        """
+        if not self.llm_service:
+            print("LLM service not available, skipping excerpt extraction")
+            return {}
+        
+        if not papers_data:
+            return {}
+        
+        # Create a simple hash of query text for caching
+        import hashlib
+        query_hash = hashlib.md5(query_text.encode()).hexdigest()[:8]
+        
+        excerpts = {}
+        
+        for paper_id, full_content, paper_title in papers_data:
+            # Check cache first
+            cache_key = (query_hash, paper_id, num_excerpts)
+            if cache_key in self._excerpt_cache:
+                excerpts[paper_id] = self._excerpt_cache[cache_key]
+                continue
+            
+            # Skip if content is too short
+            if not full_content or len(full_content.strip()) < 50:
+                excerpts[paper_id] = [full_content] if full_content else []
+                continue
+            
+            # Truncate very long content to avoid token limits
+            max_content_length = 4000  # Leave room for prompt
+            truncated_content = full_content[:max_content_length]
+            if len(full_content) > max_content_length:
+                truncated_content += "... [truncated]"
+            
+            # Construct prompt for LLM
+            system_message = """You are an expert at identifying relevant excerpts from academic papers. 
+Your task is to extract multiple distinct relevant excerpts from a paper that relate to a given query.
+Return ONLY the extracted excerpts, separated by '---', without any preamble, explanation, or metadata."""
+            
+            user_prompt = f"""Query Context:
+{query_text}
+
+Paper Title: {paper_title or 'Untitled'}
+
+Paper Content:
+{truncated_content}
+
+Extract {num_excerpts} distinct relevant excerpts (each up to {max_excerpt_length} characters) from this paper that relate to the query context. Focus on:
+- Key concepts and terminology from the query
+- Relevant methodologies or approaches  
+- Related findings or conclusions
+
+Each excerpt should cover a different aspect or section of the paper. Separate each excerpt with '---' on a new line.
+
+Return only the excerpts separated by '---'."""
+            
+            try:
+                response = self.llm_service.simple_prompt(
+                    prompt=user_prompt,
+                    system_message=system_message
+                )
+                
+                # Parse excerpts separated by ---
+                raw_excerpts = [e.strip() for e in response.split('---') if e.strip()]
+                
+                # Truncate each excerpt if needed and take up to num_excerpts
+                parsed_excerpts = []
+                for excerpt in raw_excerpts[:num_excerpts]:
+                    if len(excerpt) > max_excerpt_length:
+                        excerpt = excerpt[:max_excerpt_length] + "..."
+                    parsed_excerpts.append(excerpt)
+                
+                # Ensure we have at least one excerpt
+                if not parsed_excerpts:
+                    parsed_excerpts = [full_content[:max_excerpt_length]]
+                
+                excerpts[paper_id] = parsed_excerpts
+                self._excerpt_cache[cache_key] = parsed_excerpts
+                
+                # Log the extracted excerpts with preview
+                print(f"Extracted {len(parsed_excerpts)} excerpts for paper {paper_id} ('{paper_title}'):")
+                for i, excerpt in enumerate(parsed_excerpts, 1):
+                    preview = excerpt[:150] + "..." if len(excerpt) > 150 else excerpt
+                    print(f"  Excerpt {i} ({len(excerpt)} chars): {preview}")
+                
+            except Exception as e:
+                print(f"Failed to extract excerpts for paper {paper_id}: {e}")
+                # Fallback to truncated original content
+                excerpts[paper_id] = [full_content[:max_excerpt_length]]
+        
+        return excerpts
+    
     def rerank_results(
         self,
         query_texts: List[str],
         results: List[Tuple[str, float, Dict]],
-        top_k: int = 20
+        top_k: int = 20,
+        paper_excerpts: Optional[Dict[int, List[str]]] = None
     ) -> List[Tuple[str, float, Dict]]:
         """
         Re-rank similarity results using a cross-encoder model for improved accuracy.
@@ -117,6 +235,7 @@ class SimilarityService:
             query_texts: List of query text strings (e.g. [note_content, connected_node_1_content...])
             results: Initial similarity results
             top_k: Number of top results to return after re-ranking
+            paper_excerpts: Optional dict mapping paper_id to list of extracted excerpts (takes precedence over node content)
             
         Returns:
             Re-ranked list of (node_id, score, metadata) tuples
@@ -148,16 +267,33 @@ class SimilarityService:
         valid_indices = [] # Indices of results that have content to rerank
         
         for i, (node_id, score, metadata) in enumerate(results):
-            text_content = metadata.get('content', '') or metadata.get('description', '') or metadata.get('title', '')
+            # Check if we have paper excerpts for this node's paper
+            paper_id = metadata.get('paper_id')
             
-            if not text_content:
+            text_contents = []
+            if paper_excerpts and paper_id and paper_id in paper_excerpts:
+                # Use all excerpts from the paper
+                excerpts_list = paper_excerpts[paper_id]
+                if isinstance(excerpts_list, list):
+                    text_contents = excerpts_list
+                else:
+                    text_contents = [excerpts_list]  # Handle legacy single excerpt
+            else:
+                # Use node's own content
+                node_content = metadata.get('content', '') or metadata.get('description', '') or metadata.get('title', '')
+                if node_content:
+                    text_contents = [node_content]
+            
+            if not text_contents:
                 continue
             
             valid_indices.append(i)
             
+            # Create pairs for each query with each excerpt
             for q_idx, query in enumerate(queries):
-                all_pairs.append([query, text_content])
-                result_map.append(i)
+                for text_content in text_contents:
+                    all_pairs.append([query, text_content])
+                    result_map.append(i)
                 
         if not all_pairs:
             return results[:top_k]
