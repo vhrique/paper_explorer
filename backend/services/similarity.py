@@ -157,32 +157,36 @@ class SimilarityService:
                 continue
             
             # Truncate very long content to avoid token limits
-            max_content_length = 4000  # Leave room for prompt
-            truncated_content = full_content[:max_content_length]
-            if len(full_content) > max_content_length:
-                truncated_content += "... [truncated]"
+            # max_content_length = 4000  # Leave room for prompt
+            truncated_content = full_content #[:max_content_length]
+            # if len(full_content) > max_content_length:
+            #     truncated_content += "... [truncated]"
             
             # Construct prompt for LLM
-            system_message = """You are an expert at identifying relevant excerpts from academic papers. 
-Your task is to extract multiple distinct relevant excerpts from a paper that relate to a given query.
-Return ONLY the extracted excerpts, separated by '---', without any preamble, explanation, or metadata."""
+            system_message = """
+                You are an expert at identifying relevant excerpts from academic papers. 
+                Your task is to extract multiple distinct relevant excerpts from a paper that relate to a given query.
+                Return ONLY the extracted excerpts, separated by '---', without any preamble, explanation, or metadata.
+            """
             
-            user_prompt = f"""Query Context:
-{query_text}
+            user_prompt = f"""
+                Query Context:
+                {query_text}
 
-Paper Title: {paper_title or 'Untitled'}
+                Paper Title: {paper_title or 'Untitled'}
 
-Paper Content:
-{truncated_content}
+                Paper Content:
+                {truncated_content}
 
-Extract {num_excerpts} distinct relevant excerpts (each up to {max_excerpt_length} characters) from this paper that relate to the query context. Focus on:
-- Key concepts and terminology from the query
-- Relevant methodologies or approaches  
-- Related findings or conclusions
+                Extract {num_excerpts} distinct relevant excerpts (each up to {max_excerpt_length} characters) from this paper that relate to the query context. Focus on:
+                - Key concepts and terminology from the query
+                - Relevant methodologies or approaches  
+                - Related findings or conclusions
 
-Each excerpt should cover a different aspect or section of the paper. Separate each excerpt with '---' on a new line.
+                Each excerpt should cover a different aspect or section of the paper. Separate each excerpt with '---' on a new line.
 
-Return only the excerpts separated by '---'."""
+                Return only the excerpts separated by '---'.
+            """
             
             try:
                 response = self.llm_service.simple_prompt(
