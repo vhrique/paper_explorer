@@ -350,6 +350,76 @@ def get_nodes_by_paper(paper_id: int) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def get_context_nodes(paper_id: int, node_id: str, context_size: int = 1, include_embeddings: bool = False) -> List[Dict[str, Any]]:
+    """
+    Retrieve context nodes (preceding and succeeding) for a given node.
+    
+    Args:
+        paper_id: The paper ID
+        node_id: The node ID to get context for
+        context_size: Number of nodes to get before and after (default 1)
+        include_embeddings: Whether to include embedding vectors
+    
+    Returns:
+        List of node dictionaries including the target node and its context
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Get the target node's created_at timestamp
+    cursor.execute("SELECT created_at FROM nodes WHERE id = %s", (node_id,))
+    target_row = cursor.fetchone()
+    
+    if not target_row:
+        conn.close()
+        return []
+    
+    target_created_at = target_row['created_at']
+    
+    # Get nodes before (ordered by created_at DESC, limit context_size)
+    select_fields = "*" if include_embeddings else """
+        id, project_id, paper_id, note_id, type, content, page_number, 
+        bbox, paper_color, title, tag_scores, created_at
+    """
+    
+    cursor.execute(f"""
+        SELECT {select_fields}
+        FROM nodes 
+        WHERE paper_id = %s AND created_at < %s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """, (paper_id, target_created_at, context_size))
+    
+    before_nodes = [dict(row) for row in cursor.fetchall()]
+    before_nodes.reverse()  # Reverse to get chronological order
+    
+    # Get the target node
+    cursor.execute(f"""
+        SELECT {select_fields}
+        FROM nodes 
+        WHERE id = %s
+    """, (node_id,))
+    
+    target_node = [dict(cursor.fetchone())]
+    
+    # Get nodes after (ordered by created_at ASC, limit context_size)
+    cursor.execute(f"""
+        SELECT {select_fields}
+        FROM nodes 
+        WHERE paper_id = %s AND created_at > %s
+        ORDER BY created_at ASC
+        LIMIT %s
+    """, (paper_id, target_created_at, context_size))
+    
+    after_nodes = [dict(row) for row in cursor.fetchall()]
+    
+    conn.close()
+    
+    # Combine: before + target + after
+    return before_nodes + target_node + after_nodes
+
+
+
 def update_node_metadata(node_id: str, updates: Dict[str, Any]) -> bool:
     """
     Update node metadata (e.g., color, tag_scores).

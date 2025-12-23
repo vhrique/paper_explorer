@@ -115,7 +115,7 @@ class SimilarityService:
     def extract_paper_excerpts(
         self,
         query_text: str,
-        papers_data: List[Tuple[int, str, str]],  # (paper_id, full_content, title)
+        papers_data: List[Tuple[int, List[Dict], str]],  # (paper_id, list_of_nodes, title)
         num_excerpts: int = 3,
         max_excerpt_length: int = 500
     ) -> Dict[int, List[str]]:
@@ -124,7 +124,8 @@ class SimilarityService:
         
         Args:
             query_text: The query context (e.g., note content)
-            papers_data: List of (paper_id, full_content, title) tuples
+            papers_data: List of (paper_id, list_of_nodes, title) tuples
+                        Each node dict should have: id, content, page_number, type
             num_excerpts: Number of distinct excerpts to extract per paper
             max_excerpt_length: Maximum length of each excerpt
             
@@ -144,23 +145,60 @@ class SimilarityService:
         
         excerpts = {}
         
-        for paper_id, full_content, paper_title in papers_data:
+        for paper_id, nodes_list, paper_title in papers_data:
             # Check cache first
             cache_key = (query_hash, paper_id, num_excerpts)
             if cache_key in self._excerpt_cache:
                 excerpts[paper_id] = self._excerpt_cache[cache_key]
                 continue
             
-            # Skip if content is too short
-            if not full_content or len(full_content.strip()) < 50:
-                excerpts[paper_id] = [full_content] if full_content else []
+            # Skip if no nodes
+            if not nodes_list:
+                excerpts[paper_id] = []
                 continue
             
-            # Truncate very long content to avoid token limits
-            # max_content_length = 4000  # Leave room for prompt
-            truncated_content = full_content #[:max_content_length]
-            # if len(full_content) > max_content_length:
-            #     truncated_content += "... [truncated]"
+            # Construct content from nodes in order with gap indicators
+            # Sort by page_number then by creation (implicit in order from DB)
+            sorted_nodes = sorted(nodes_list, key=lambda x: (x.get('page_number', 0), x.get('id', '')))
+            
+            content_parts = []
+            prev_page = None
+            prev_node_id = None
+            
+            for node in sorted_nodes:
+                current_page = node.get('page_number')
+                node_content = node.get('content', '').strip()
+                node_id = node.get('id', '')
+                node_type = node.get('type', 'text')
+                
+                if not node_content:
+                    continue
+                
+                # Add page/gap indicators
+                if prev_page is not None and current_page != prev_page:
+                    # Page changed
+                    if current_page - prev_page > 1:
+                        content_parts.append(f"\n\n[... pages {prev_page+1}-{current_page-1} omitted ...]\n\n")
+                    else:
+                        content_parts.append(f"\n\n[Page {current_page}]\n")
+                elif prev_page is None:
+                    content_parts.append(f"[Page {current_page}]\n")
+                
+                # Add content with type indicator
+                if node_type == 'image':
+                    content_parts.append(f"[IMAGE: {node_content}]\n")
+                else:
+                    content_parts.append(f"{node_content}\n")
+                
+                prev_page = current_page
+                prev_node_id = node_id
+            
+            full_content = ''.join(content_parts)
+            
+            # Skip if content is too short
+            if len(full_content.strip()) < 50:
+                excerpts[paper_id] = [full_content] if full_content else []
+                continue
             
             # Construct prompt for LLM
             system_message = """
@@ -175,8 +213,8 @@ class SimilarityService:
 
                 Paper Title: {paper_title or 'Untitled'}
 
-                Paper Content:
-                {truncated_content}
+                Paper Content (from top similarity results with context):
+                {full_content}
 
                 Extract {num_excerpts} distinct relevant excerpts (each up to {max_excerpt_length} characters) from this paper that relate to the query context. Focus on:
                 - Key concepts and terminology from the query
@@ -212,7 +250,7 @@ class SimilarityService:
                 self._excerpt_cache[cache_key] = parsed_excerpts
                 
                 # Log the extracted excerpts with preview
-                print(f"Extracted {len(parsed_excerpts)} excerpts for paper {paper_id} ('{paper_title}'):")
+                print(f"Extracted {len(parsed_excerpts)} excerpts for paper {paper_id} ('{paper_title}') from {len(sorted_nodes)} nodes:")
                 for i, excerpt in enumerate(parsed_excerpts, 1):
                     preview = excerpt[:150] + "..." if len(excerpt) > 150 else excerpt
                     print(f"  Excerpt {i} ({len(excerpt)} chars): {preview}")
@@ -223,6 +261,7 @@ class SimilarityService:
                 excerpts[paper_id] = [full_content[:max_excerpt_length]]
         
         return excerpts
+
     
     def rerank_results(
         self,

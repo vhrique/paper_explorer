@@ -10,7 +10,7 @@ import psycopg2.extras
 from typing import List
 
 from database import (init_db, get_db_connection, insert_nodes, get_nodes_by_project, 
-                     get_nodes_by_ids, get_nodes_by_paper, update_node_metadata, 
+                     get_nodes_by_ids, get_nodes_by_paper, get_context_nodes, update_node_metadata, 
                      update_nodes_by_ids, delete_nodes_by_paper, delete_nodes_by_project, similarity_search)
 from models import (ProjectCreate, Project, ProjectUpdate, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
                     NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, 
@@ -1338,37 +1338,12 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
     
     print(f"Grouped nodes into {len(nodes_by_paper)} papers")
     
-    # Per-paper similarity search
-    all_paper_results = []
-    papers_data_for_excerpts = []
+    # Per-paper similarity search with enhanced flow
+    all_paper_final_results = []
     
     # Define how many top nodes to get per paper
     nodes_per_paper = max(5, limit // max(len(nodes_by_paper), 1))
-    
-    for paper_id, paper_nodes in nodes_by_paper.items():
-        # Find similar nodes within this paper
-        paper_results = similarity_service.find_similar_nodes(
-            query_embeddings=query_embeddings,
-            nodes=paper_nodes,
-            limit=nodes_per_paper,
-            use_new_embeddings=use_new_embeddings
-        )
-        
-        if paper_results:
-            all_paper_results.append((paper_id, paper_results))
-            
-            # Collect paper content for excerpt extraction
-            sorted_nodes = sorted(
-                [(r[2].get('page_number', 0), r[2].get('content', '')) for r in paper_results],
-                key=lambda x: x[0]
-            )
-            full_content = ' '.join([content for _, content in sorted_nodes if content])
-            paper_title = paper_map.get(paper_id, 'Untitled')
-            
-            if full_content.strip():
-                papers_data_for_excerpts.append((paper_id, full_content, paper_title))
-    
-    print(f"Found results in {len(all_paper_results)} papers")
+    context_size = 1  # Number of preceding/succeeding nodes to include
     
     # Construct query texts for reranking and excerpt extraction
     query_texts = []
@@ -1380,50 +1355,128 @@ def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = 
         if c_text and isinstance(c_text, str) and len(c_text.strip()) > 0:
             query_texts.append(c_text)
     
-    # Extract paper excerpts using LLM
-    paper_excerpts = {}
-    try:
-        if query_texts and note.get('content') and papers_data_for_excerpts:
-            # Limit to top 10 papers to avoid too many LLM calls
-            top_papers = papers_data_for_excerpts[:10]
-            paper_excerpts = similarity_service.extract_paper_excerpts(
-                query_text=note['content'],
-                papers_data=top_papers,
-                num_excerpts=3,
-                max_excerpt_length=500
+    for paper_id, paper_nodes in nodes_by_paper.items():
+        paper_title = paper_map.get(paper_id, 'Untitled')
+        print(f"\nProcessing paper {paper_id} ('{paper_title}')...")
+        
+        # Step 1: Initial similarity search on paper nodes
+        initial_results = similarity_service.find_similar_nodes(
+            query_embeddings=query_embeddings,
+            nodes=paper_nodes,
+            limit=nodes_per_paper,
+            use_new_embeddings=use_new_embeddings
+        )
+        
+        if not initial_results:
+            print(f"  No initial results for paper {paper_id}")
+            continue
+        
+        print(f"  Found {len(initial_results)} initial results")
+        
+        # Step 2: Collect nodes with context for LLM excerpt extraction
+        nodes_with_context = []
+        seen_node_ids = set()
+        
+        for node_id, score, metadata in initial_results:
+            # Get context nodes (preceding + target + succeeding)
+            context_nodes_list = get_context_nodes(
+                paper_id=paper_id,
+                node_id=node_id,
+                context_size=context_size,
+                include_embeddings=False
             )
-            print(f"Extracted excerpts for {len(paper_excerpts)} papers")
-    
-    except Exception as e:
-        print(f"Excerpt extraction failed: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Rerank results per paper using excerpts
-    all_reranked_results = []
-    
-    for paper_id, paper_results in all_paper_results:
-        try:
-            if query_texts:
-                # Get excerpts for this paper if available
-                current_paper_excerpts = {paper_id: paper_excerpts[paper_id]} if paper_id in paper_excerpts else {}
-                
+            
+            for ctx_node in context_nodes_list:
+                if ctx_node['id'] not in seen_node_ids:
+                    nodes_with_context.append(ctx_node)
+                    seen_node_ids.add(ctx_node['id'])
+        
+        print(f"  Collected {len(nodes_with_context)} nodes with context for LLM")
+        
+        # Step 3: Extract LLM excerpts from focused nodes
+        paper_excerpts = {}
+        if query_texts and note.get('content') and nodes_with_context:
+            try:
+                paper_excerpts = similarity_service.extract_paper_excerpts(
+                    query_text=note['content'],
+                    papers_data=[(paper_id, nodes_with_context, paper_title)],
+                    num_excerpts=3,
+                    max_excerpt_length=1000
+                )
+            except Exception as e:
+                print(f"  Excerpt extraction failed for paper {paper_id}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        # Step 4: Generate embeddings from LLM excerpts
+        excerpt_embeddings = []
+        if paper_id in paper_excerpts:
+            for excerpt in paper_excerpts[paper_id]:
+                try:
+                    excerpt_emb = embedding_service.generate_text_embedding(excerpt)
+                    if excerpt_emb:
+                        excerpt_embeddings.append(excerpt_emb)
+                except Exception as e:
+                    print(f"  Failed to generate embedding for excerpt: {e}")
+        
+        print(f"  Generated {len(excerpt_embeddings)} excerpt embeddings")
+        
+        # Step 5: NEW similarity search using excerpt embeddings
+        excerpt_results = []
+        if excerpt_embeddings:
+            try:
+                excerpt_results = similarity_service.find_similar_nodes(
+                    query_embeddings=excerpt_embeddings,
+                    nodes=paper_nodes,
+                    limit=nodes_per_paper,
+                    use_new_embeddings=use_new_embeddings
+                )
+                print(f"  Found {len(excerpt_results)} nodes via excerpt search")
+            except Exception as e:
+                print(f"  Excerpt-based search failed: {e}")
+        
+        # Step 6: Merge initial results + excerpt results (deduplicate)
+        merged_results = {}  # node_id -> (node_id, max_score, metadata)
+        
+        # Add initial results
+        for node_id, score, metadata in initial_results:
+            merged_results[node_id] = (node_id, score, metadata)
+        
+        # Add excerpt results, keeping higher score if duplicate
+        for node_id, score, metadata in excerpt_results:
+            if node_id in merged_results:
+                existing_score = merged_results[node_id][1]
+                if score > existing_score:
+                    merged_results[node_id] = (node_id, score, metadata)
+            else:
+                merged_results[node_id] = (node_id, score, metadata)
+        
+        merged_list = list(merged_results.values())
+        merged_list.sort(key=lambda x: x[1], reverse=True)
+        print(f"  Merged to {len(merged_list)} unique results")
+        
+        # Step 7: Rerank merged results using excerpts
+        if query_texts and merged_list:
+            try:
                 reranked = similarity_service.rerank_results(
                     query_texts=query_texts,
-                    results=paper_results,
+                    results=merged_list,
                     top_k=nodes_per_paper,
-                    paper_excerpts=current_paper_excerpts
+                    paper_excerpts=paper_excerpts
                 )
-                all_reranked_results.extend(reranked)
-            else:
-                all_reranked_results.extend(paper_results)
-        except Exception as e:
-            print(f"Reranking failed for paper {paper_id}: {e}")
-            all_reranked_results.extend(paper_results)
+                all_paper_final_results.extend(reranked)
+                print(f"  Reranked to top {len(reranked)} results")
+            except Exception as e:
+                print(f"  Reranking failed for paper {paper_id}: {e}")
+                all_paper_final_results.extend(merged_list[:nodes_per_paper])
+        else:
+            all_paper_final_results.extend(merged_list[:nodes_per_paper])
     
-    # Sort all results by score and limit
-    all_reranked_results.sort(key=lambda x: x[1], reverse=True)
-    similar_results = all_reranked_results[:limit + 1]
+    print(f"\nTotal results from all papers: {len(all_paper_final_results)}")
+    
+    # Step 8: Final merge - sort all per-paper results by score and limit
+    all_paper_final_results.sort(key=lambda x: x[1], reverse=True)
+    similar_results = all_paper_final_results[:limit + 1]
     
     # Build response
     similar_nodes = []
