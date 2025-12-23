@@ -33,6 +33,8 @@ services:
         condition: service_completed_successfully
       ollama:
         condition: service_healthy
+      pull_ollama_model:
+        condition: service_completed_successfully
     networks:
       - paper-explorer-network
 
@@ -118,6 +120,7 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+      - ./backend/Modelfile:/app/Modelfile
     deploy:
       resources:
         reservations:
@@ -130,6 +133,28 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - paper-explorer-network
+
+  pull_ollama_model:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./backend/Modelfile:/app/Modelfile
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Pulling gemma3:4b model...';
+      ollama pull gemma3:4b;
+      echo 'Creating custom model with 32k context...';
+      ollama create gemma3-32k -f /app/Modelfile;
+      echo 'Model setup complete';
+      exit 0;
+      "
     networks:
       - paper-explorer-network
 
