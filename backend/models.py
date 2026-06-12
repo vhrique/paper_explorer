@@ -100,6 +100,10 @@ class ChunkResult(BaseModel):
     similarity: float
     rects: Optional[List[dict]] = []
 
+class SearchResponse(BaseModel):
+    answer: Optional[str] = None   # LLM-synthesized answer; None if LLM unavailable
+    chunks: List[ChunkResult]
+
 class SimilarPassage(BaseModel):
     passage_id: int
     paper_id: int

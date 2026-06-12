@@ -75,6 +75,11 @@ export interface ChunkResult {
   rects: Rect[];
 }
 
+export interface SearchResponse {
+  answer: string | null;
+  chunks: ChunkResult[];
+}
+
 export const api = {
   // Projects
   listProjects: () => axios.get<Project[]>(`${BASE}/projects`).then(r => r.data),
@@ -137,5 +142,5 @@ export const api = {
 
   // Q&A
   searchPaper: (paperId: number, query: string, limit = 10) =>
-    axios.post<ChunkResult[]>(`${BASE}/papers/${paperId}/search`, { query, limit }).then(r => r.data),
+    axios.post<SearchResponse>(`${BASE}/papers/${paperId}/search`, { query, limit }).then(r => r.data),
 };
