@@ -17,11 +17,11 @@ services:
       # Embedding — point to LM Studio or any OpenAI-compatible provider
       - EMBEDDING_BASE_URL=http://host.docker.internal:1234/v1
       - EMBEDDING_API_KEY=lm-studio
-      - EMBEDDING_MODEL=text-embedding-3-small
+      - EMBEDDING_MODEL=text-embedding-nomic-embed-text-v1.5
       # LLM — same pattern
       - LLM_BASE_URL=http://host.docker.internal:1234/v1
       - LLM_API_KEY=lm-studio
-      - LLM_MODEL=gemma3
+      - LLM_MODEL=qwen/qwen3-vl-4b
     depends_on:
       postgres:
         condition: service_healthy
