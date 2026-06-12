@@ -5,9 +5,12 @@ from pathlib import Path
 from typing import List, Optional
 
 import psycopg2
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
+load_dotenv()  # loads .env if present; env vars already set take precedence
 
 from database import (
     execute, execute_returning, fetchall, fetchone,
@@ -17,9 +20,10 @@ from models import (
     ChunkResult, Note, NoteCreate, NoteUpdate,
     Paper, PaperUpdate, Passage, PassageCreate, PassageUpdate,
     Project, ProjectCreate, ProjectUpdate,
-    SearchQuery, SimilarPassage, Tag, TagCreate, TagUpdate,
+    SearchQuery, SearchResponse, SimilarPassage, Tag, TagCreate, TagUpdate,
 )
 from services.embedding import get_embedding_service
+from services.llm_service import get_llm_service
 from services.pdf_processor import extract_chunks, extract_doi
 from services.similarity import find_similar
 from services.storage import get_storage
@@ -539,12 +543,12 @@ def delete_note(note_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Q&A: question → relevant chunks in a paper
+# Q&A: question → relevant chunks + LLM-synthesized answer
 # ---------------------------------------------------------------------------
 
-@app.post("/papers/{paper_id}/search", response_model=List[ChunkResult])
+@app.post("/papers/{paper_id}/search", response_model=SearchResponse)
 def search_paper(paper_id: int, query: SearchQuery):
-    paper = fetchone("SELECT id FROM papers WHERE id = %s", (paper_id,))
+    paper = fetchone("SELECT title FROM papers WHERE id = %s", (paper_id,))
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
@@ -558,23 +562,44 @@ def search_paper(paper_id: int, query: SearchQuery):
         (paper_id,)
     )
     candidates = [
-        {"id": r["id"], "embedding": json_to_embedding(r["embedding"]), "_row": r}
+        {"id": r["id"], "embedding": json_to_embedding(r["embedding"])}
         for r in chunks_raw
     ]
 
     results = find_similar(query_emb, candidates, limit=query.limit)
     row_map = {r["id"]: r for r in chunks_raw}
 
-    return [
-        {
-            "chunk_id": cid,
-            "page": row_map[cid]["page"],
-            "text": row_map[cid]["text"],
-            "similarity": sim,
-            "rects": json.loads(row_map[cid].get("rects") or "[]"),
-        }
+    chunks = [
+        ChunkResult(
+            chunk_id=cid,
+            page=row_map[cid]["page"],
+            text=row_map[cid]["text"],
+            similarity=sim,
+            rects=json.loads(row_map[cid].get("rects") or "[]"),
+        )
         for cid, sim in results
     ]
+
+    # Try to synthesize an answer with the LLM
+    answer = None
+    if chunks:
+        try:
+            context = "\n\n---\n\n".join(
+                f"[Page {c.page + 1}] {c.text}" for c in chunks[:5]
+            )
+            answer = get_llm_service().complete(
+                prompt=(
+                    f"Question: {query.query}\n\n"
+                    f"Relevant passages from \"{paper['title']}\":\n\n{context}\n\n"
+                    "Answer the question based only on the passages above. "
+                    "Be concise. If the passages don't contain enough information, say so."
+                ),
+                system="You are a research assistant helping a scientist understand a paper. Answer questions based strictly on the provided passages.",
+            )
+        except Exception as e:
+            print(f"LLM synthesis failed: {e}")
+
+    return SearchResponse(answer=answer, chunks=chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -584,3 +609,23 @@ def search_paper(paper_id: int, query: SearchQuery):
 @app.get("/")
 def root():
     return {"message": "Paper Explorer API v2"}
+
+
+@app.get("/health")
+def health():
+    """Check connectivity to embedding and LLM services."""
+    status = {"api": "ok", "embedding": "unknown", "llm": "unknown"}
+
+    try:
+        get_embedding_service().embed("health check")
+        status["embedding"] = "ok"
+    except Exception as e:
+        status["embedding"] = f"error: {e}"
+
+    try:
+        get_llm_service().complete("Reply with the single word: ok", system="Reply with exactly one word.")
+        status["llm"] = "ok"
+    except Exception as e:
+        status["llm"] = f"error: {e}"
+
+    return status

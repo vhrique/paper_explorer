@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type ChunkResult, type Note, type Passage, type SimilarPassage, type Tag } from '../api';
+import { api, type ChunkResult, type Note, type Passage, type SearchResponse, type SimilarPassage, type Tag } from '../api';
 import { Highlighter, Search, Link2, StickyNote, Tag as TagIcon, Trash2, Plus, X } from 'lucide-react';
 
 type Tab = 'passages' | 'similar' | 'search' | 'notes';
@@ -23,7 +23,7 @@ export function ContextPanel({
   const [similar, setSimilar] = useState<SimilarPassage[]>([]);
   const [similarLoading, setSimilarLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<ChunkResult[]>([]);
+  const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [newNote, setNewNote] = useState('');
@@ -54,8 +54,8 @@ export function ContextPanel({
     if (!searchQuery.trim()) return;
     setSearching(true);
     try {
-      const results = await api.searchPaper(paperId, searchQuery);
-      setSearchResults(results);
+      const response = await api.searchPaper(paperId, searchQuery);
+      setSearchResponse(response);
     } finally {
       setSearching(false);
     }
@@ -240,10 +240,16 @@ export function ContextPanel({
                 {searching ? '…' : 'Go'}
               </button>
             </div>
-            {searchResults.length === 0 && !searching && searchQuery && (
+            {!searching && searchResponse && searchResponse.chunks.length === 0 && (
               <p className="text-xs text-gray-400 text-center py-4">No results.</p>
             )}
-            {searchResults.map(r => (
+            {searchResponse?.answer && (
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                <p className="text-xs font-medium text-blue-700 mb-1">Answer</p>
+                <p className="text-xs text-gray-800 whitespace-pre-wrap">{searchResponse.answer}</p>
+              </div>
+            )}
+            {searchResponse?.chunks.map(r => (
               <div key={r.chunk_id} className="p-3 border border-gray-200 rounded-xl">
                 <div className="flex items-center justify-between mb-1">
                   <p className="text-xs text-gray-400">Page {r.page + 1}</p>
