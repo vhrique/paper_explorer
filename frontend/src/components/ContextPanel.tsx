@@ -15,12 +15,13 @@ interface Props {
   onSimilarClick?: (s: SimilarPassage, allFromPaper: SimilarPassage[]) => void;
   onOpenLinkedPaper?: (paperId: number, paperTitle: string, page: number, rects: Rect[]) => void;
   onLinkDeleted?: (linkId: number) => void;
+  linksVersion?: number;
 }
 
 export function ContextPanel({
   paperId, projectId, passages, selectedPassage,
   onSelectPassage, onPassageDeleted, onPassageUpdated, onSimilarClick,
-  onOpenLinkedPaper, onLinkDeleted,
+  onOpenLinkedPaper, onLinkDeleted, linksVersion,
 }: Props) {
   const [tab, setTab] = useState<Tab>('passages');
   const [tags, setTags] = useState<Tag[]>([]);
@@ -65,7 +66,7 @@ export function ContextPanel({
       .then(setLinks)
       .catch(() => setLinks([]))
       .finally(() => setLinksLoading(false));
-  }, [tab, paperId, passages.length]);
+  }, [tab, paperId, passages.length, linksVersion]);
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
