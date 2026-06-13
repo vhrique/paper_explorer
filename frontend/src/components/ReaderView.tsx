@@ -141,6 +141,25 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setLinkingRect(null);
   }, [linkingPassage]);
 
+  const handleOpenLinkedPaper = (remotePaperId: number, remotePaperTitle: string, remotePage: number, remoteRects: Rect[]) => {
+    const synthetic: SimilarPassage = {
+      passage_id: 0,
+      paper_id: remotePaperId,
+      paper_title: remotePaperTitle,
+      page: remotePage,
+      text: '',
+      similarity: 1,
+      rects: remoteRects,
+      tags: [],
+      source: 'passage',
+    };
+    handleSimilarClick(synthetic, []);
+  };
+
+  const handleLinkDeletedFromPanel = (linkId: number) => {
+    setPassageLinks(prev => prev.filter(l => l.id !== linkId));
+  };
+
   const handleUnlink = useCallback(async (passageId: number) => {
     const secondIds = new Set(secondPassages.map(p => p.id));
     const firstIds = new Set(passages.map(p => p.id));
@@ -329,6 +348,8 @@ export function ReaderView({ paper, project, onBack }: Props) {
               onPassageDeleted={handlePassageDeleted}
               onPassageUpdated={handlePassageUpdated}
               onSimilarClick={handleSimilarClick}
+              onOpenLinkedPaper={handleOpenLinkedPaper}
+              onLinkDeleted={handleLinkDeletedFromPanel}
             />
           </div>
         )}

@@ -18,7 +18,7 @@ from database import (
 )
 from models import (
     ChunkResult, Note, NoteCreate, NoteUpdate,
-    Paper, PaperUpdate, Passage, PassageCreate, PassageLink, PassageUpdate,
+    Paper, PaperUpdate, Passage, PassageCreate, PassageLink, PassageLinkDetail, PassageUpdate,
     Project, ProjectCreate, ProjectUpdate,
     SearchQuery, SearchResponse, SimilarPassage, Tag, TagCreate, TagUpdate,
 )
@@ -370,6 +370,43 @@ def delete_passage_link(passage_id: int, other_id: int):
     p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
     execute("DELETE FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s", (p1, p2))
     return {"message": "Link deleted"}
+
+
+@app.get("/papers/{paper_id}/links", response_model=List[PassageLinkDetail])
+def get_paper_links(paper_id: int):
+    rows = fetchall(
+        """
+        SELECT pl.id, pl.created_at, pl.passage_id_1, pl.passage_id_2,
+               p1.text AS text1, p1.page AS page1, p1.rects AS rects1, p1.paper_id AS pid1,
+               p2.text AS text2, p2.page AS page2, p2.rects AS rects2, p2.paper_id AS pid2,
+               pa1.title AS title1, pa2.title AS title2
+        FROM passage_links pl
+        JOIN passages p1 ON pl.passage_id_1 = p1.id
+        JOIN passages p2 ON pl.passage_id_2 = p2.id
+        JOIN papers pa1 ON p1.paper_id = pa1.id
+        JOIN papers pa2 ON p2.paper_id = pa2.id
+        WHERE p1.paper_id = %s OR p2.paper_id = %s
+        ORDER BY pl.created_at DESC
+        """,
+        (paper_id, paper_id)
+    )
+    result = []
+    for r in rows:
+        local_is_1 = r["pid1"] == paper_id
+        result.append({
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "local_passage_id": r["passage_id_1"] if local_is_1 else r["passage_id_2"],
+            "local_passage_text": r["text1"] if local_is_1 else r["text2"],
+            "local_page": r["page1"] if local_is_1 else r["page2"],
+            "remote_passage_id": r["passage_id_2"] if local_is_1 else r["passage_id_1"],
+            "remote_passage_text": r["text2"] if local_is_1 else r["text1"],
+            "remote_page": r["page2"] if local_is_1 else r["page1"],
+            "remote_rects": r["rects2"] if local_is_1 else r["rects1"],
+            "remote_paper_id": r["pid2"] if local_is_1 else r["pid1"],
+            "remote_paper_title": r["title2"] if local_is_1 else r["title1"],
+        })
+    return result
 
 
 @app.get("/passages/{passage_id}/similar", response_model=List[SimilarPassage])
