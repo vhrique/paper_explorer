@@ -45,10 +45,11 @@ interface Props {
   linkingTarget?: boolean;
   onLinkTarget?: (passage: Passage) => void;
   linkedPassages?: { page: number; rects: Rect[]; passageId: number }[];
+  onLinkedRectsChange?: (rects: { passageId: number; rect: DOMRect }[]) => void;
   onUnlink?: (passageId: number) => void;
 }
 
-export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onUnlink }: Props) {
+export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
@@ -111,6 +112,41 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
       window.removeEventListener('resize', compute);
     };
   }, [connectedPassages, scale, numPages, onConnectedRectsChange, onOffscreenRectsChange]);
+
+  useEffect(() => {
+    if (!onLinkedRectsChange) return;
+    if (!linkedPassages?.length) { onLinkedRectsChange([]); return; }
+    const compute = () => {
+      const cb = containerRef.current?.getBoundingClientRect();
+      if (!cb) { onLinkedRectsChange([]); return; }
+      const result: { passageId: number; rect: DOMRect }[] = [];
+      for (const lp of linkedPassages) {
+        const pageEl = pageRefs.current[lp.page];
+        if (!pageEl) continue;
+        const pb = pageEl.getBoundingClientRect();
+        const r = lp.rects[0];
+        if (!r) continue;
+        const midY = pb.top + (r.y + r.height / 2) * pb.height;
+        const rawLeft = pb.left + r.x * pb.width;
+        const rawRight = rawLeft + r.width * pb.width;
+        const clampedLeft = Math.max(rawLeft, cb.left);
+        const clampedRight = Math.min(rawRight, cb.right);
+        if (clampedRight > clampedLeft) {
+          result.push({ passageId: lp.passageId, rect: new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0) });
+        }
+      }
+      onLinkedRectsChange(result);
+    };
+    const raf = requestAnimationFrame(() => requestAnimationFrame(compute));
+    const el = containerRef.current;
+    el?.addEventListener('scroll', compute);
+    window.addEventListener('resize', compute);
+    return () => {
+      cancelAnimationFrame(raf);
+      el?.removeEventListener('scroll', compute);
+      window.removeEventListener('resize', compute);
+    };
+  }, [linkedPassages, scale, numPages, onLinkedRectsChange]);
 
   useEffect(() => {
     api.listTags(projectId).then(setTags);
@@ -482,26 +518,6 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                         backgroundColor: '#7c3aed',
                         opacity: 0.4,
                         outline: '2.5px solid #7c3aed',
-                        borderRadius: '2px',
-                      }}
-                    />
-                  ))
-                )}
-
-                {/* Linked passage highlights (manual links — teal) */}
-                {linkedPassages?.filter(lp => lp.page === i).flatMap((lp, li) =>
-                  lp.rects.map((rect, ri) => (
-                    <div
-                      key={`link-${li}-${ri}`}
-                      className="absolute pointer-events-none"
-                      style={{
-                        left: `${rect.x * 100}%`,
-                        top: `${rect.y * 100}%`,
-                        width: `${rect.width * 100}%`,
-                        height: `${rect.height * 100}%`,
-                        backgroundColor: '#0d9488',
-                        opacity: 0.25,
-                        outline: '2px solid #0d9488',
                         borderRadius: '2px',
                       }}
                     />
