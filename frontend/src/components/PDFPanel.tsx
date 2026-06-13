@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import { api, type Passage, type Rect, type Tag } from '../api';
-import { X, Minus, Plus, Tag as TagIcon, Trash2 } from 'lucide-react';
+import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.js',
@@ -40,9 +40,15 @@ interface Props {
   connectedPassages?: ConnectedPassage[];
   onConnectedRectsChange?: (rects: DOMRect[]) => void;
   onOffscreenRectsChange?: (rects: DOMRect[]) => void;
+  // Linking
+  onLinkStart?: (passage: Passage, sourceRect: DOMRect | null) => void;
+  linkingTarget?: boolean;
+  onLinkTarget?: (passage: Passage) => void;
+  linkedPassages?: { page: number; rects: Rect[]; passageId: number }[];
+  onUnlink?: (passageId: number) => void;
 }
 
-export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange }: Props) {
+export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onUnlink }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
@@ -282,6 +288,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
       <div
         ref={containerRef}
         className="flex-1 overflow-y-auto px-4 py-4 relative select-text"
+        style={linkingTarget ? { cursor: 'crosshair' } : undefined}
         onMouseUp={handleMouseUp}
       >
         <Document
@@ -305,7 +312,10 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                 const hit = (passagesByPage[i] ?? []).find(p =>
                   p.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)
                 );
-                if (hit) onPassageClick(hit);
+                if (hit) {
+                  if (linkingTarget && onLinkTarget) onLinkTarget(hit);
+                  else onPassageClick(hit);
+                }
               }}
             >
               <Page
@@ -323,6 +333,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                   const passageTagIds = new Set(passage.tags.map(t => t.id));
                   const availableTags = tags.filter(t => !passageTagIds.has(t.id) && t.type === 'content');
                   const isHovered = hoveredPassageId === passage.id;
+                  const isLinked = linkedPassages?.some(lp => lp.passageId === passage.id) ?? false;
                   return (
                     <div key={passage.id} style={{ position: 'static' }}>
                       {passage.rects.map((rect, ri) => (
@@ -358,6 +369,34 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                           >
                             <TagIcon size={13} />
                           </button>
+                          {onLinkStart && (
+                            <button
+                              onClick={e => {
+                                e.stopPropagation();
+                                const pageEl = pageRefs.current[passage.page];
+                                const r = passage.rects[0];
+                                let passageRect: DOMRect | null = null;
+                                if (pageEl && r) {
+                                  const pb = pageEl.getBoundingClientRect();
+                                  passageRect = new DOMRect(pb.left + r.x * pb.width, pb.top + r.y * pb.height, r.width * pb.width, r.height * pb.height);
+                                }
+                                onLinkStart(passage, passageRect);
+                              }}
+                              className="p-1 text-gray-500 hover:text-teal-600 rounded hover:bg-teal-50 transition-colors"
+                              title="Link to another passage"
+                            >
+                              <Link2 size={13} />
+                            </button>
+                          )}
+                          {isLinked && onUnlink && (
+                            <button
+                              onClick={e => { e.stopPropagation(); onUnlink(passage.id); }}
+                              className="p-1 text-teal-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
+                              title="Remove link"
+                            >
+                              <Unlink size={13} />
+                            </button>
+                          )}
                           <button
                             onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
                             className="p-1 text-gray-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
@@ -429,7 +468,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                   );
                 })}
 
-                {/* Connected passage highlights */}
+                {/* Connected passage highlights (similarity — purple) */}
                 {connectedPassages?.filter(cp => cp.highlight && cp.page === i).flatMap((cp, ci) =>
                   cp.rects.map((rect, ri) => (
                     <div
@@ -443,6 +482,46 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                         backgroundColor: '#7c3aed',
                         opacity: 0.4,
                         outline: '2.5px solid #7c3aed',
+                        borderRadius: '2px',
+                      }}
+                    />
+                  ))
+                )}
+
+                {/* Linked passage highlights (manual links — teal) */}
+                {linkedPassages?.filter(lp => lp.page === i).flatMap((lp, li) =>
+                  lp.rects.map((rect, ri) => (
+                    <div
+                      key={`link-${li}-${ri}`}
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: `${rect.x * 100}%`,
+                        top: `${rect.y * 100}%`,
+                        width: `${rect.width * 100}%`,
+                        height: `${rect.height * 100}%`,
+                        backgroundColor: '#0d9488',
+                        opacity: 0.25,
+                        outline: '2px solid #0d9488',
+                        borderRadius: '2px',
+                      }}
+                    />
+                  ))
+                )}
+
+                {/* Linking-target hover highlight */}
+                {linkingTarget && hoveredPassageId !== null && (passagesByPage[i] ?? []).filter(p => p.id === hoveredPassageId).flatMap(p =>
+                  p.rects.map((rect, ri) => (
+                    <div
+                      key={`lt-${ri}`}
+                      className="absolute pointer-events-none"
+                      style={{
+                        left: `${rect.x * 100}%`,
+                        top: `${rect.y * 100}%`,
+                        width: `${rect.width * 100}%`,
+                        height: `${rect.height * 100}%`,
+                        backgroundColor: '#0d9488',
+                        opacity: 0.35,
+                        outline: '2.5px solid #0d9488',
                         borderRadius: '2px',
                       }}
                     />

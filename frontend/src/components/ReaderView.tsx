@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, type Paper, type Passage, type Project, type Rect, type SimilarPassage } from '../api';
+import { api, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage } from '../api';
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
@@ -27,6 +27,12 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [targetRects, setTargetRects] = useState<DOMRect[]>([]);
   const [offscreenTargetRects, setOffscreenTargetRects] = useState<DOMRect[]>([]);
 
+  // Linking state
+  const [linkingPassage, setLinkingPassage] = useState<{ passage: Passage; panel: 'first' | 'second' } | null>(null);
+  const [linkingRect, setLinkingRect] = useState<DOMRect | null>(null);
+  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  const [passageLinks, setPassageLinks] = useState<PassageLink[]>([]);
+
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
   }, [paper.id]);
@@ -35,6 +41,25 @@ export function ReaderView({ paper, project, onBack }: Props) {
     if (!connectedSimilar) { setSecondPassages([]); return; }
     api.listPassages(connectedSimilar.paper_id).then(setSecondPassages);
   }, [connectedSimilar?.paper_id]);
+
+  // Load passage links when both panels are open
+  useEffect(() => {
+    if (!connectedSimilar || passages.length === 0) { setPassageLinks([]); return; }
+    Promise.all(passages.map(p => api.getPassageLinks(p.id)))
+      .then(results => setPassageLinks(results.flat()));
+  }, [connectedSimilar?.paper_id, passages]);
+
+  // Mouse tracking + Escape key for linking mode
+  useEffect(() => {
+    if (!linkingPassage) { setMousePos(null); return; }
+    const onMove = (e: MouseEvent) => setMousePos({ x: e.clientX, y: e.clientY });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setLinkingPassage(null); setLinkingRect(null); }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('keydown', onKey); };
+  }, [linkingPassage]);
 
   const handlePassageCreated = (passage: Passage) => {
     setPassages(prev => [...prev, passage]);
@@ -95,9 +120,60 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setSecondJumpToPassage(undefined);
     setTargetRects([]);
     setOffscreenTargetRects([]);
+    setPassageLinks([]);
+    setLinkingPassage(null);
+    setLinkingRect(null);
   };
 
-  // Stable arrays — useMemo so effect deps in PDFPanel don't see a new reference every render
+  // Linking handlers
+  const handleLinkStart = useCallback((passage: Passage, rect: DOMRect | null, panel: 'first' | 'second') => {
+    setLinkingPassage({ passage, panel });
+    setLinkingRect(rect);
+  }, []);
+
+  const handleLinkTarget = useCallback(async (targetPassage: Passage) => {
+    if (!linkingPassage) return;
+    const link = await api.createPassageLink(linkingPassage.passage.id, targetPassage.id);
+    setPassageLinks(prev => [...prev, link]);
+    setLinkingPassage(null);
+    setLinkingRect(null);
+  }, [linkingPassage]);
+
+  const handleUnlink = useCallback(async (passageId: number) => {
+    const secondIds = new Set(secondPassages.map(p => p.id));
+    const firstIds = new Set(passages.map(p => p.id));
+    const link = passageLinks.find(l =>
+      (l.passage_id_1 === passageId && (secondIds.has(l.passage_id_2) || firstIds.has(l.passage_id_2))) ||
+      (l.passage_id_2 === passageId && (secondIds.has(l.passage_id_1) || firstIds.has(l.passage_id_1)))
+    );
+    if (!link) return;
+    await api.deletePassageLink(link.passage_id_1, link.passage_id_2);
+    setPassageLinks(prev => prev.filter(l => l.id !== link.id));
+  }, [passageLinks, passages, secondPassages]);
+
+  // Derive linked passages for each panel
+  const secondPassageIds = useMemo(() => new Set(secondPassages.map(p => p.id)), [secondPassages]);
+  const firstPassageIds = useMemo(() => new Set(passages.map(p => p.id)), [passages]);
+
+  const linkedInFirstPanel = useMemo(() =>
+    passages
+      .filter(p => passageLinks.some(l =>
+        (l.passage_id_1 === p.id && secondPassageIds.has(l.passage_id_2)) ||
+        (l.passage_id_2 === p.id && secondPassageIds.has(l.passage_id_1))
+      ))
+      .map(p => ({ page: p.page, rects: p.rects, passageId: p.id })),
+  [passages, passageLinks, secondPassageIds]);
+
+  const linkedInSecondPanel = useMemo(() =>
+    secondPassages
+      .filter(p => passageLinks.some(l =>
+        (l.passage_id_1 === p.id && firstPassageIds.has(l.passage_id_2)) ||
+        (l.passage_id_2 === p.id && firstPassageIds.has(l.passage_id_1))
+      ))
+      .map(p => ({ page: p.page, rects: p.rects, passageId: p.id })),
+  [secondPassages, passageLinks, firstPassageIds]);
+
+  // Stable arrays for similarity connection lines
   const sourceConnectedPassages = useMemo(() =>
     selectedPassage && connectedSimilar && connectedSimilarList.length > 0
       ? [{ page: selectedPassage.page, rects: selectedPassage.rects, highlight: false }]
@@ -108,10 +184,11 @@ export function ReaderView({ paper, project, onBack }: Props) {
     sourceRect ? connectedSimilarList.map(s => ({ page: s.page, rects: s.rects, highlight: true })) : [],
   [connectedSimilarList, sourceRect]);
 
-  // Stable callback — new DOMRect objects from compute() would otherwise re-trigger the effect
   const handleSourceRectsChange = useCallback((rects: DOMRect[]) => {
     setSourceRect(rects[0] ?? null);
   }, []);
+
+  const secondPanelOpen = !!connectedSimilar;
 
   return (
     <div className="flex flex-col h-screen bg-gray-100">
@@ -124,7 +201,16 @@ export function ReaderView({ paper, project, onBack }: Props) {
           <p className="text-xs text-gray-400 truncate">{project.name}</p>
           <p className="text-sm font-semibold text-gray-800 truncate">{paper.title}</p>
         </div>
-        {connectedSimilar && (
+        {linkingPassage && (
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-50 border border-teal-200 rounded-lg">
+            <div className="w-2 h-2 rounded-full bg-teal-500 animate-pulse flex-shrink-0" />
+            <p className="text-xs text-teal-700">Click a passage in the other panel to link · Esc to cancel</p>
+            <button onClick={() => { setLinkingPassage(null); setLinkingRect(null); }} className="p-0.5 text-teal-400 hover:text-teal-600">
+              <X size={13} />
+            </button>
+          </div>
+        )}
+        {connectedSimilar && !linkingPassage && (
           <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-lg min-w-0 max-w-xs">
             <div className="w-2 h-2 rounded-full bg-purple-500 flex-shrink-0" />
             <p className="text-xs text-purple-700 truncate">
@@ -162,6 +248,11 @@ export function ReaderView({ paper, project, onBack }: Props) {
             jumpToPage={jumpToPage}
             connectedPassages={sourceConnectedPassages}
             onConnectedRectsChange={handleSourceRectsChange}
+            onLinkStart={secondPanelOpen ? (p, r) => handleLinkStart(p, r, 'first') : undefined}
+            linkingTarget={linkingPassage?.panel === 'second'}
+            onLinkTarget={linkingPassage?.panel === 'second' ? handleLinkTarget : undefined}
+            linkedPassages={secondPanelOpen ? linkedInFirstPanel : undefined}
+            onUnlink={secondPanelOpen ? handleUnlink : undefined}
           />
         </div>
 
@@ -188,6 +279,11 @@ export function ReaderView({ paper, project, onBack }: Props) {
                 connectedPassages={targetConnectedPassages}
                 onConnectedRectsChange={setTargetRects}
                 onOffscreenRectsChange={setOffscreenTargetRects}
+                onLinkStart={(p, r) => handleLinkStart(p, r, 'second')}
+                linkingTarget={linkingPassage?.panel === 'first'}
+                onLinkTarget={linkingPassage?.panel === 'first' ? handleLinkTarget : undefined}
+                linkedPassages={linkedInSecondPanel}
+                onUnlink={handleUnlink}
               />
             </div>
           </div>
@@ -210,8 +306,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
         )}
       </div>
 
-      {/* K connection lines overlay */}
-      {connectedSimilar && <ConnectionOverlay sourceRect={sourceRect} targetRects={targetRects} offscreenRects={offscreenTargetRects} />}
+      {/* Overlay: similarity lines + rubber-band link line */}
+      <ConnectionOverlay
+        sourceRect={sourceRect}
+        targetRects={targetRects}
+        offscreenRects={offscreenTargetRects}
+        linkingSource={linkingRect}
+        linkingMouse={mousePos}
+      />
     </div>
   );
 }

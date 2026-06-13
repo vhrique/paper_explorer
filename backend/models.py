@@ -104,6 +104,13 @@ class SearchResponse(BaseModel):
     answer: Optional[str] = None   # LLM-synthesized answer; None if LLM unavailable
     chunks: List[ChunkResult]
 
+class PassageLink(BaseModel):
+    id: int
+    passage_id_1: int
+    passage_id_2: int
+    created_at: datetime
+
+
 class SimilarPassage(BaseModel):
     passage_id: int
     paper_id: int
