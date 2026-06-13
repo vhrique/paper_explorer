@@ -34,6 +34,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [passageLinks, setPassageLinks] = useState<PassageLink[]>([]);
   const [firstLinkedRects, setFirstLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
   const [secondLinkedRects, setSecondLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
+  const [linksVersion, setLinksVersion] = useState(0);
 
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
@@ -42,7 +43,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   useEffect(() => {
     if (!connectedSimilar) { setSecondPassages([]); return; }
     api.listPassages(connectedSimilar.paper_id).then(setSecondPassages);
-  }, [connectedSimilar?.paper_id]);
+  }, [connectedSimilar]);
 
   // Load passage links when both panels are open
   useEffect(() => {
@@ -137,6 +138,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
     if (!linkingPassage) return;
     const link = await api.createPassageLink(linkingPassage.passage.id, targetPassage.id);
     setPassageLinks(prev => [...prev, link]);
+    setLinksVersion(v => v + 1);
     setLinkingPassage(null);
     setLinkingRect(null);
   }, [linkingPassage]);
@@ -158,6 +160,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   const handleLinkDeletedFromPanel = (linkId: number) => {
     setPassageLinks(prev => prev.filter(l => l.id !== linkId));
+    setLinksVersion(v => v + 1);
   };
 
   const handleUnlink = useCallback(async (passageId: number) => {
@@ -350,6 +353,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
               onSimilarClick={handleSimilarClick}
               onOpenLinkedPaper={handleOpenLinkedPaper}
               onLinkDeleted={handleLinkDeletedFromPanel}
+              linksVersion={linksVersion}
             />
           </div>
         )}
