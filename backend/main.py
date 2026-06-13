@@ -326,7 +326,14 @@ def update_passage(passage_id: int, update: PassageUpdate):
 
 @app.delete("/passages/{passage_id}")
 def delete_passage(passage_id: int):
+    tag_ids = [r["tag_id"] for r in fetchall(
+        "SELECT tag_id FROM passage_tags WHERE passage_id = %s", (passage_id,)
+    )]
     execute("DELETE FROM passages WHERE id = %s", (passage_id,))
+    for tag_id in tag_ids:
+        still_used = fetchone("SELECT 1 FROM passage_tags WHERE tag_id = %s LIMIT 1", (tag_id,))
+        if not still_used:
+            execute("DELETE FROM tags WHERE id = %s", (tag_id,))
     return {"message": "Passage deleted"}
 
 
@@ -340,31 +347,43 @@ def get_similar_passages(passage_id: int, limit: int = 10):
     if not query_emb:
         raise HTTPException(status_code=400, detail="Passage has no embedding yet")
 
-    # Get all passages in the same project(s), excluding this one
-    candidates_raw = fetchall("""
-        SELECT p.*, pa.title as paper_title
+    project_ids_subquery = "SELECT project_id FROM paper_projects WHERE paper_id = %s"
+
+    # Passage candidates (highlights from other papers in the same project)
+    passage_rows = fetchall("""
+        SELECT p.*, pa.title as paper_title, 'passage' as source
         FROM passages p
         JOIN papers pa ON pa.id = p.paper_id
         JOIN paper_projects pp ON pp.paper_id = pa.id
-        WHERE pp.project_id IN (
-            SELECT project_id FROM paper_projects WHERE paper_id = %s
-        )
-        AND p.id != %s
+        WHERE pp.project_id IN ({})
+        AND pa.id != %s
         AND p.embedding IS NOT NULL
-    """, (passage["paper_id"], passage_id))
+    """.format(project_ids_subquery), (passage["paper_id"], passage["paper_id"]))
 
+    # Chunk candidates (raw chunks from other papers in the same project)
+    chunk_rows = fetchall("""
+        SELECT c.*, pa.title as paper_title, 'chunk' as source
+        FROM chunks c
+        JOIN papers pa ON pa.id = c.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id IN ({})
+        AND pa.id != %s
+        AND c.embedding IS NOT NULL
+    """.format(project_ids_subquery), (passage["paper_id"], passage["paper_id"]))
+
+    all_rows = passage_rows + chunk_rows
     candidates = [
-        {"id": r["id"], "embedding": json_to_embedding(r["embedding"]), "_row": r}
-        for r in candidates_raw
+        {"id": (r["source"], r["id"]), "embedding": json_to_embedding(r["embedding"]), "_row": r}
+        for r in all_rows
     ]
 
     results = find_similar(query_emb, candidates, limit=limit)
 
-    row_map = {r["id"]: r for r in candidates_raw}
+    row_map = {(r["source"], r["id"]): r for r in all_rows}
     similar = []
-    for pid, sim in results:
-        r = row_map[pid]
-        p = _passage_with_tags(r)
+    for key, sim in results:
+        r = row_map[key]
+        tags = _passage_with_tags(r)["tags"] if r["source"] == "passage" else []
         similar.append({
             "passage_id": r["id"],
             "paper_id": r["paper_id"],
@@ -373,7 +392,8 @@ def get_similar_passages(passage_id: int, limit: int = 10):
             "text": r["text"],
             "similarity": sim,
             "rects": json.loads(r.get("rects") or "[]"),
-            "tags": p["tags"],
+            "tags": tags,
+            "source": r["source"],
         })
     return similar
 
@@ -439,6 +459,12 @@ def remove_passage_tag(passage_id: int, tag_id: int):
         "DELETE FROM passage_tags WHERE passage_id = %s AND tag_id = %s",
         (passage_id, tag_id)
     )
+    still_used = fetchone(
+        "SELECT 1 FROM passage_tags WHERE tag_id = %s LIMIT 1",
+        (tag_id,)
+    )
+    if not still_used:
+        execute("DELETE FROM tags WHERE id = %s", (tag_id,))
     return {"message": "Tag removed"}
 
 
@@ -605,6 +631,49 @@ def search_paper(paper_id: int, query: SearchQuery):
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+
+@app.post("/admin/normalize-chunk-rects")
+def normalize_chunk_rects():
+    """One-time migration: convert chunk rects from absolute PDF-point coords to 0-1 normalized."""
+    import fitz
+
+    paper_rows = fetchall("SELECT DISTINCT c.paper_id FROM chunks c")
+    updated = 0
+    errors = []
+
+    for row in paper_rows:
+        paper_id = row["paper_id"]
+        paper = fetchone("SELECT filename FROM papers WHERE id = %s", (paper_id,))
+        if not paper:
+            continue
+        try:
+            pdf_bytes = storage.download(f"pdfs/{paper_id}/{paper['filename']}")
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            page_dims = {i: (p.rect.width or 612, p.rect.height or 792) for i, p in enumerate(doc)}
+            doc.close()
+        except Exception as e:
+            errors.append(f"paper {paper_id}: {e}")
+            continue
+
+        chunks = fetchall("SELECT id, page, rects FROM chunks WHERE paper_id = %s", (paper_id,))
+        for chunk in chunks:
+            rects = json.loads(chunk.get("rects") or "[]")
+            if not rects:
+                continue
+            r = rects[0]
+            # skip already-normalized rects
+            if r.get("x", 0) <= 2 and r.get("y", 0) <= 2:
+                continue
+            pw, ph = page_dims.get(chunk["page"], (612, 792))
+            normalized = [{"x": rc["x"] / pw, "y": rc["y"] / ph,
+                           "width": rc["width"] / pw, "height": rc["height"] / ph}
+                          for rc in rects]
+            execute("UPDATE chunks SET rects = %s WHERE id = %s",
+                    (json.dumps(normalized), chunk["id"]))
+            updated += 1
+
+    return {"updated": updated, "errors": errors}
+
 
 @app.get("/")
 def root():

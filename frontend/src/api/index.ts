@@ -65,6 +65,7 @@ export interface SimilarPassage {
   similarity: number;
   rects: Rect[];
   tags: Tag[];
+  source: 'passage' | 'chunk';
 }
 
 export interface ChunkResult {

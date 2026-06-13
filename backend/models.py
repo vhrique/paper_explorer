@@ -113,3 +113,4 @@ class SimilarPassage(BaseModel):
     similarity: float
     rects: Optional[List[dict]] = []
     tags: Optional[List[Tag]] = []
+    source: str = 'passage'  # 'passage' | 'chunk'
