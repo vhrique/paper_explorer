@@ -26,6 +26,7 @@ from services.embedding import get_embedding_service
 from services.llm_service import get_llm_service
 from services.pdf_processor import extract_chunks, extract_doi
 from services.similarity import find_similar
+from services.similarity_model import train_similarity_model, load_similarity_model
 from services.storage import get_storage
 
 app = FastAPI(title="Paper Explorer API v2")
@@ -75,6 +76,51 @@ def create_project(project: ProjectCreate):
         "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING *",
         (project.name, project.description)
     )
+
+
+@app.post("/projects/{project_id}/train-similarity")
+def train_project_similarity(project_id: int):
+    project = fetchone("SELECT * FROM projects WHERE id = %s", (project_id,))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    passages = fetchall("""
+        SELECT p.*
+        FROM passages p
+        JOIN papers pa ON pa.id = p.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = %s
+    """, (project_id,))
+
+    if not passages:
+        raise HTTPException(status_code=400, detail="No highlights found in this project. Please highlight text to create passages first.")
+
+    has_embeddings = any(p.get("embedding") for p in passages)
+    if not has_embeddings:
+        raise HTTPException(status_code=400, detail="No passages with embeddings found. Please wait for embeddings to generate.")
+
+    links = fetchall("""
+        SELECT DISTINCT pl.id, pl.passage_id_1, pl.passage_id_2
+        FROM passage_links pl
+        JOIN passages p1 ON pl.passage_id_1 = p1.id
+        JOIN papers pa1 ON p1.paper_id = pa1.id
+        JOIN paper_projects pp1 ON pp1.paper_id = pa1.id
+        WHERE pp1.project_id = %s
+    """, (project_id,))
+
+    chunks = fetchall("""
+        SELECT c.*
+        FROM chunks c
+        JOIN papers pa ON pa.id = c.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = %s
+    """, (project_id,))
+
+    success = train_similarity_model(project_id, passages, links, chunks=chunks)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to train similarity model")
+
+    return {"message": "Similarity model trained successfully"}
 
 
 @app.patch("/projects/{project_id}", response_model=Project)
@@ -418,7 +464,7 @@ def get_paper_links(paper_id: int):
 
 
 @app.get("/passages/{passage_id}/similar", response_model=List[SimilarPassage])
-def get_similar_passages(passage_id: int, limit: int = 10):
+def get_similar_passages(passage_id: int, limit: int = 10, project_id: Optional[int] = None):
     passage = fetchone("SELECT * FROM passages WHERE id = %s", (passage_id,))
     if not passage:
         raise HTTPException(status_code=404, detail="Passage not found")
@@ -427,7 +473,23 @@ def get_similar_passages(passage_id: int, limit: int = 10):
     if not query_emb:
         raise HTTPException(status_code=400, detail="Passage has no embedding yet")
 
-    project_ids_subquery = "SELECT project_id FROM paper_projects WHERE paper_id = %s"
+    if project_id is None:
+        proj_row = fetchone("SELECT project_id FROM paper_projects WHERE paper_id = %s", (passage["paper_id"],))
+        if proj_row:
+            project_id = proj_row["project_id"]
+
+    model = None
+    if project_id is not None:
+        model = load_similarity_model(project_id)
+
+    if project_id is not None:
+        subquery = "%s"
+        params_passage = (project_id, passage["paper_id"])
+        params_chunk = (project_id, passage["paper_id"])
+    else:
+        subquery = "SELECT project_id FROM paper_projects WHERE paper_id = %s"
+        params_passage = (passage["paper_id"], passage["paper_id"])
+        params_chunk = (passage["paper_id"], passage["paper_id"])
 
     # Passage candidates (highlights from other papers in the same project)
     passage_rows = fetchall("""
@@ -435,10 +497,10 @@ def get_similar_passages(passage_id: int, limit: int = 10):
         FROM passages p
         JOIN papers pa ON pa.id = p.paper_id
         JOIN paper_projects pp ON pp.paper_id = pa.id
-        WHERE pp.project_id IN ({})
+        WHERE pp.project_id = {}
         AND pa.id != %s
         AND p.embedding IS NOT NULL
-    """.format(project_ids_subquery), (passage["paper_id"], passage["paper_id"]))
+    """.format(subquery), params_passage)
 
     # Chunk candidates (raw chunks from other papers in the same project)
     chunk_rows = fetchall("""
@@ -446,10 +508,10 @@ def get_similar_passages(passage_id: int, limit: int = 10):
         FROM chunks c
         JOIN papers pa ON pa.id = c.paper_id
         JOIN paper_projects pp ON pp.paper_id = pa.id
-        WHERE pp.project_id IN ({})
+        WHERE pp.project_id = {}
         AND pa.id != %s
         AND c.embedding IS NOT NULL
-    """.format(project_ids_subquery), (passage["paper_id"], passage["paper_id"]))
+    """.format(subquery), params_chunk)
 
     all_rows = passage_rows + chunk_rows
     candidates = [
@@ -457,7 +519,7 @@ def get_similar_passages(passage_id: int, limit: int = 10):
         for r in all_rows
     ]
 
-    results = find_similar(query_emb, candidates, limit=limit)
+    results = find_similar(query_emb, candidates, limit=limit, model=model)
 
     row_map = {(r["source"], r["id"]): r for r in all_rows}
     similar = []
@@ -663,6 +725,12 @@ def search_paper(paper_id: int, query: SearchQuery):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {e}")
 
+    # Load project-specific similarity model if available
+    proj_row = fetchone("SELECT project_id FROM paper_projects WHERE paper_id = %s", (paper_id,))
+    model = None
+    if proj_row:
+        model = load_similarity_model(proj_row["project_id"])
+
     chunks_raw = fetchall(
         "SELECT * FROM chunks WHERE paper_id = %s AND embedding IS NOT NULL",
         (paper_id,)
@@ -672,7 +740,7 @@ def search_paper(paper_id: int, query: SearchQuery):
         for r in chunks_raw
     ]
 
-    results = find_similar(query_emb, candidates, limit=query.limit)
+    results = find_similar(query_emb, candidates, limit=query.limit, model=model)
     row_map = {r["id"]: r for r in chunks_raw}
 
     chunks = [

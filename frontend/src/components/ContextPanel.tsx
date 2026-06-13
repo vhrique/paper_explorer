@@ -46,11 +46,11 @@ export function ContextPanel({
   useEffect(() => {
     if (!selectedPassage) { setSimilar([]); return; }
     setSimilarLoading(true);
-    api.getSimilarPassages(selectedPassage.id)
+    api.getSimilarPassages(selectedPassage.id, 10, projectId)
       .then(setSimilar)
       .catch(() => setSimilar([]))
       .finally(() => setSimilarLoading(false));
-  }, [selectedPassage?.id]);
+  }, [selectedPassage?.id, projectId]);
 
   // Load notes when selected passage changes
   useEffect(() => {

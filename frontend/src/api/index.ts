@@ -139,8 +139,10 @@ export const api = {
   updatePassage: (id: number, data: { color?: string }) =>
     axios.patch<Passage>(`${BASE}/passages/${id}`, data).then(r => r.data),
   deletePassage: (id: number) => axios.delete(`${BASE}/passages/${id}`),
-  getSimilarPassages: (id: number, limit = 10) =>
-    axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit } }).then(r => r.data),
+  getSimilarPassages: (id: number, limit = 10, projectId?: number) =>
+    axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit, project_id: projectId } }).then(r => r.data),
+  trainSimilarity: (projectId: number) =>
+    axios.post<{ message: string }>(`${BASE}/projects/${projectId}/train-similarity`).then(r => r.data),
   getPassageLinks: (id: number) =>
     axios.get<PassageLink[]>(`${BASE}/passages/${id}/links`).then(r => r.data),
   getPaperLinks: (paperId: number) =>
