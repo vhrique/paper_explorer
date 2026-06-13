@@ -3,7 +3,7 @@ import { api, type Paper, type Passage, type PassageLink, type Project, type Rec
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
-import { ArrowLeft, PanelRight, X } from 'lucide-react';
+import { ArrowLeft, PanelRight, X, BookOpen } from 'lucide-react';
 
 interface Props {
   paper: Paper;
@@ -49,6 +49,9 @@ export function ReaderView({ paper, project, onBack }: Props) {
       matches: SimilarPassage[];
     }[];
   } | null>(null);
+
+  const [allPapersInProject, setAllPapersInProject] = useState<Paper[]>([]);
+  const [paperSelectorOpen, setPaperSelectorOpen] = useState(false);
 
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
@@ -301,6 +304,38 @@ export function ReaderView({ paper, project, onBack }: Props) {
     }
   };
 
+  const handleOpenPaperSelector = async () => {
+    const list = await api.listPapers(project.id);
+    const otherPapers = list.filter(p => p.id !== paper.id);
+    setAllPapersInProject(otherPapers);
+    setPaperSelectorOpen(true);
+  };
+
+  const handleSelectComparePaper = (targetPaper: Paper) => {
+    const synthetic: SimilarPassage = {
+      passage_id: 0,
+      paper_id: targetPaper.id,
+      paper_title: targetPaper.title,
+      page: 0,
+      text: '',
+      similarity: 1,
+      rects: [],
+      tags: [],
+      source: 'passage',
+    };
+    setConnectedSimilar(synthetic);
+    setConnectedSimilarList([]);
+    setTargetRects([]);
+    setPaperSelectorOpen(false);
+
+    if (selectedPassage) {
+      api.getSimilarPassages(selectedPassage.id).then(results => {
+        const forPaper = results.filter(s => s.paper_id === targetPaper.id);
+        setConnectedSimilarList(forPaper);
+      });
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       {/* Header */}
@@ -356,6 +391,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
             <span className="text-xs font-medium text-gray-600">Manual Links</span>
           </label>
         </div>
+        <button
+          onClick={handleOpenPaperSelector}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:bg-gray-50 hover:text-blue-600 transition-colors mr-2 text-gray-600"
+          title="Compare with another paper"
+        >
+          <BookOpen size={14} />
+          <span>Compare Paper</span>
+        </button>
         <button
           onClick={() => setContextOpen(o => !o)}
           className={`p-1.5 rounded-lg transition-colors ${contextOpen ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-400'}`}
@@ -489,6 +532,40 @@ export function ReaderView({ paper, project, onBack }: Props) {
                   </span>
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modal for selecting any paper to open in compare panel */}
+      {paperSelectorOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-800">Compare with Paper</h3>
+              <button
+                onClick={() => setPaperSelectorOpen(false)}
+                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Select another paper from the project <strong>{project.name}</strong>:
+            </p>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto">
+              {allPapersInProject.length === 0 ? (
+                <p className="text-xs text-gray-400 text-center py-4">No other papers in this project.</p>
+              ) : (
+                allPapersInProject.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => handleSelectComparePaper(p)}
+                    className="w-full text-left p-3 border border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-colors rounded-xl truncate text-xs font-semibold text-gray-700 block"
+                  >
+                    {p.title}
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>
