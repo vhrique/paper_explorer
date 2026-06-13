@@ -65,6 +65,28 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   const [newTagName, setNewTagName] = useState('');
   const [addingTag, setAddingTag] = useState(false);
   const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Intercept Ctrl + Scroll Wheel (or Trackpad Pinch-to-Zoom) to zoom only the PDF document
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        setScale(s => {
+          const step = 0.08;
+          const direction = e.deltaY < 0 ? 1 : -1;
+          const next = s + direction * step;
+          return Math.min(2.5, Math.max(0.6, next));
+        });
+      }
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
 
   useEffect(() => {
     if (!onConnectedRectsChange && !onOffscreenRectsChange) return;
