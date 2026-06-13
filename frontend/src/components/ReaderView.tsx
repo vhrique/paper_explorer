@@ -3,7 +3,7 @@ import { api, type Paper, type Passage, type PassageLink, type Project, type Rec
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
-import { ArrowLeft, PanelRight, X, BookOpen } from 'lucide-react';
+import { ArrowLeft, PanelRight, X, BookOpen, Cpu } from 'lucide-react';
 
 interface Props {
   paper: Paper;
@@ -20,6 +20,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   // Second panel state
   const [connectedSimilar, setConnectedSimilar] = useState<SimilarPassage | null>(null);
   const [connectedSimilarList, setConnectedSimilarList] = useState<SimilarPassage[]>([]);
+  const [trainingSimilarity, setTrainingSimilarity] = useState(false);
   const [secondPassages, setSecondPassages] = useState<Passage[]>([]);
   const [secondSelectedPassage, setSecondSelectedPassage] = useState<Passage | null>(null);
   const [secondJumpToPassage, setSecondJumpToPassage] = useState<{ page: number; rect: Rect } | undefined>();
@@ -95,7 +96,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   // When selected passage changes while second PDF is open, auto-refresh connections
   useEffect(() => {
     if (!selectedPassage || !connectedSimilar) return;
-    api.getSimilarPassages(selectedPassage.id).then(results => {
+    api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
       const forPaper = results.filter(s => s.paper_id === connectedSimilar.paper_id);
       if (forPaper.length > 0) {
         setConnectedSimilar(forPaper[0]);
@@ -265,7 +266,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   const handleFindSimilar = useCallback(async (passage: Passage) => {
     setSelectedPassage(passage);
-    const results = await api.getSimilarPassages(passage.id);
+    const results = await api.getSimilarPassages(passage.id, 10, project.id);
     
     // Group by paper
     const paperGroups: { [key: number]: SimilarPassage[] } = {};
@@ -311,6 +312,34 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setPaperSelectorOpen(true);
   };
 
+  const handleTrainSimilarity = async () => {
+    setTrainingSimilarity(true);
+    try {
+      await api.trainSimilarity(project.id);
+      alert("Similarity model trained successfully!");
+      if (selectedPassage) {
+        api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
+          if (connectedSimilar) {
+            const forPaper = results.filter(s => s.paper_id === connectedSimilar.paper_id);
+            if (forPaper.length > 0) {
+              setConnectedSimilar(forPaper[0]);
+              setConnectedSimilarList(forPaper);
+            } else {
+              setConnectedSimilarList([]);
+              setTargetRects([]);
+              setOffscreenTargetRects([]);
+            }
+          }
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error training similarity model.");
+    } finally {
+      setTrainingSimilarity(false);
+    }
+  };
+
   const handleSelectComparePaper = (targetPaper: Paper) => {
     const synthetic: SimilarPassage = {
       passage_id: 0,
@@ -329,7 +358,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setPaperSelectorOpen(false);
 
     if (selectedPassage) {
-      api.getSimilarPassages(selectedPassage.id).then(results => {
+      api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
         const forPaper = results.filter(s => s.paper_id === targetPaper.id);
         setConnectedSimilarList(forPaper);
       });
@@ -391,6 +420,19 @@ export function ReaderView({ paper, project, onBack }: Props) {
             <span className="text-xs font-medium text-gray-600">Manual Links</span>
           </label>
         </div>
+        <button
+          onClick={handleTrainSimilarity}
+          disabled={trainingSimilarity}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border rounded-lg transition-colors mr-2 ${
+            trainingSimilarity
+              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              : 'border-teal-200 text-teal-600 bg-teal-50 hover:bg-teal-100 hover:text-teal-700'
+          }`}
+          title="Train a neural network projection model on manual links"
+        >
+          <Cpu size={14} className={trainingSimilarity ? "animate-spin" : ""} />
+          <span>{trainingSimilarity ? 'Training...' : 'Train Model'}</span>
+        </button>
         <button
           onClick={handleOpenPaperSelector}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:bg-gray-50 hover:text-blue-600 transition-colors mr-2 text-gray-600"
