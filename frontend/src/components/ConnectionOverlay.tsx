@@ -1,15 +1,27 @@
 interface Props {
   sourceRect: DOMRect | null;
-  targetRects: DOMRect[];
+  targetRects: { passageId: number; rect: DOMRect }[];
   offscreenRects?: DOMRect[];
   // Manual links
-  linkRects?: { source: DOMRect; target: DOMRect }[];
+  linkRects?: { source: DOMRect; target: DOMRect; sourceId: number; targetId: number }[];
   // Rubber-band during linking
   linkingSource?: DOMRect | null;
   linkingMouse?: { x: number; y: number } | null;
+  // Hover tracking
+  hoveredPassageId: number | null;
+  selectedPassageId?: number;
 }
 
-export function ConnectionOverlay({ sourceRect, targetRects, offscreenRects = [], linkRects = [], linkingSource, linkingMouse }: Props) {
+export function ConnectionOverlay({
+  sourceRect,
+  targetRects,
+  offscreenRects = [],
+  linkRects = [],
+  linkingSource,
+  linkingMouse,
+  hoveredPassageId,
+  selectedPassageId,
+}: Props) {
   const hasContent =
     (sourceRect && (targetRects.length > 0 || offscreenRects.length > 0)) ||
     linkRects.length > 0 ||
@@ -28,7 +40,7 @@ export function ConnectionOverlay({ sourceRect, targetRects, offscreenRects = []
   return (
     <svg
       className="fixed inset-0 pointer-events-none"
-      style={{ width: '100vw', height: '100vh', zIndex: 200, overflow: 'visible' }}
+      style={{ width: '100vw', height: '100vh', zIndex: 10, overflow: 'visible' }}
     >
       <defs>
         {/* Similarity gradient — purple */}
@@ -63,12 +75,18 @@ export function ConnectionOverlay({ sourceRect, targetRects, offscreenRects = []
       })}
 
       {/* Similarity: visible passages — solid glowing */}
-      {sourceRect && targetRects.map((r, i) => {
+      {sourceRect && targetRects.map((tr, i) => {
+        const r = tr.rect;
         const x2 = r.left;
         const y2 = r.top + r.height / 2;
         const d = makePath(sx, sy, x2, y2);
+
+        // Hover glow activation
+        const isHovered = hoveredPassageId === selectedPassageId || hoveredPassageId === tr.passageId;
+        const opacity = hoveredPassageId !== null ? (isHovered ? 0.9 : 0.05) : 0.25;
+
         return (
-          <g key={`on-${i}`}>
+          <g key={`on-${i}`} opacity={opacity} className="transition-opacity duration-200">
             <path d={d} stroke="#8b5cf6" strokeWidth="6" fill="none" opacity="0.2" filter="url(#conn-glow)" />
             <path d={d} stroke="url(#conn-grad)" strokeWidth="2.5" fill="none" opacity="0.85" />
             <circle cx={sx} cy={sy} r="4" fill="#7c3aed" opacity="0.8" />
@@ -84,8 +102,13 @@ export function ConnectionOverlay({ sourceRect, targetRects, offscreenRects = []
         const x2 = lr.target.left;
         const y2 = lr.target.top + lr.target.height / 2;
         const d = makePath(x1, y1, x2, y2);
+
+        // Hover glow activation
+        const isHovered = hoveredPassageId === lr.sourceId || hoveredPassageId === lr.targetId;
+        const opacity = hoveredPassageId !== null ? (isHovered ? 0.9 : 0.05) : 0.25;
+
         return (
-          <g key={`link-${i}`}>
+          <g key={`link-${i}`} opacity={opacity} className="transition-opacity duration-200">
             <path d={d} stroke="#0d9488" strokeWidth="6" fill="none" opacity="0.15" filter="url(#link-glow)" />
             <path d={d} stroke="url(#link-grad)" strokeWidth="2" fill="none" opacity="0.9" />
             <circle cx={x1} cy={y1} r="4" fill="#0d9488" opacity="0.8" />

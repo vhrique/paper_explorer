@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import { api, type Passage, type Rect, type Tag } from '../api';
-import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink } from 'lucide-react';
+import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink, Sparkles } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.js',
@@ -24,6 +24,7 @@ interface ConnectedPassage {
   page: number;
   rects: Rect[];
   highlight?: boolean; // render a visual highlight (for the second panel)
+  passageId?: number;
 }
 
 interface Props {
@@ -38,7 +39,7 @@ interface Props {
   jumpToPage?: number;
   jumpToPassage?: { page: number; rect: Rect };
   connectedPassages?: ConnectedPassage[];
-  onConnectedRectsChange?: (rects: DOMRect[]) => void;
+  onConnectedRectsChange?: (rects: { passageId: number; rect: DOMRect }[]) => void;
   onOffscreenRectsChange?: (rects: DOMRect[]) => void;
   // Linking
   onLinkStart?: (passage: Passage, sourceRect: DOMRect | null) => void;
@@ -47,9 +48,11 @@ interface Props {
   linkedPassages?: { page: number; rects: Rect[]; passageId: number }[];
   onLinkedRectsChange?: (rects: { passageId: number; rect: DOMRect }[]) => void;
   onUnlink?: (passageId: number) => void;
+  onFindSimilar?: (passage: Passage) => void;
+  onPassageHover?: (passageId: number | null) => void;
 }
 
-export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink }: Props) {
+export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
@@ -73,9 +76,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
       }
       const cb = containerRef.current?.getBoundingClientRect();
       if (!cb) { onConnectedRectsChange?.([]); onOffscreenRectsChange?.([]); return; }
-      const visible: DOMRect[] = [];
-      const offscreen: DOMRect[] = [];
-      const cx = cb.left + 24; // left edge of panel for offscreen anchors
+      const visible: { passageId: number; rect: DOMRect }[] = [];
       for (const cp of connectedPassages) {
         const pageEl = pageRefs.current[cp.page];
         if (!pageEl) continue;
@@ -85,22 +86,19 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
         const midY = isNormalized
           ? pb.top + (r.y + r.height / 2) * pb.height
           : pb.top + pb.height * 0.1;
-        if (midY < cb.top - 20) {
-          offscreen.push(new DOMRect(cx, cb.top, 0, 0));
-        } else if (midY > cb.bottom + 20) {
-          offscreen.push(new DOMRect(cx, cb.bottom, 0, 0));
-        } else {
-          const rawLeft = isNormalized ? pb.left + r.x * pb.width : pb.left + pb.width * 0.1;
-          const rawRight = isNormalized ? rawLeft + r.width * pb.width : pb.left + pb.width * 0.9;
-          const clampedLeft = Math.max(rawLeft, cb.left);
-          const clampedRight = Math.min(rawRight, cb.right);
-          if (clampedRight > clampedLeft) {
-            visible.push(new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0));
-          }
+        const rawLeft = isNormalized ? pb.left + r.x * pb.width : pb.left + pb.width * 0.1;
+        const rawRight = isNormalized ? rawLeft + r.width * pb.width : pb.left + pb.width * 0.9;
+        const clampedLeft = Math.max(rawLeft, cb.left);
+        const clampedRight = Math.min(rawRight, cb.right);
+        if (clampedRight > clampedLeft) {
+          visible.push({
+            passageId: cp.passageId ?? 0,
+            rect: new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0)
+          });
         }
       }
       onConnectedRectsChange?.(visible);
-      onOffscreenRectsChange?.(offscreen);
+      onOffscreenRectsChange?.([]);
     };
     const raf = requestAnimationFrame(() => requestAnimationFrame(compute));
     const el = containerRef.current;
@@ -264,10 +262,16 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
     );
     if (hit) {
       if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
-      setHoveredPassageId(hit.id);
+      if (hoveredPassageId !== hit.id) {
+        setHoveredPassageId(hit.id);
+        onPassageHover?.(hit.id);
+      }
     } else {
       if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
-      hoverTimeout.current = setTimeout(() => setHoveredPassageId(null), 300);
+      hoverTimeout.current = setTimeout(() => {
+        setHoveredPassageId(null);
+        onPassageHover?.(null);
+      }, 300);
     }
   };
 
@@ -307,7 +311,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   return (
     <div className="relative flex flex-col h-full bg-gray-100">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200 flex-shrink-0">
+      <div className="relative z-20 flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200 flex-shrink-0">
         <div className="flex items-center gap-2">
           <button onClick={() => setScale(s => Math.max(0.6, s - 0.2))} className="p-1 rounded hover:bg-gray-100">
             <Minus size={14} />
@@ -338,7 +342,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
               ref={el => { pageRefs.current[i] = el; }}
               className="relative shadow-lg"
               onMouseMove={e => handlePageMouseMove(e, i)}
-              onMouseLeave={() => { if (taggingPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => setHoveredPassageId(null), 300); } }}
+              onMouseLeave={() => { if (taggingPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => { setHoveredPassageId(null); onPassageHover?.(null); }, 300); } }}
               onClick={e => {
                 const el = pageRefs.current[i];
                 if (!el) return;
@@ -405,6 +409,15 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                           >
                             <TagIcon size={13} />
                           </button>
+                          {onFindSimilar && (
+                            <button
+                              onClick={e => { e.stopPropagation(); onFindSimilar(passage); }}
+                              className="p-1 text-gray-500 hover:text-purple-600 rounded hover:bg-purple-50 transition-colors"
+                              title="Find similar passages"
+                            >
+                              <Sparkles size={13} />
+                            </button>
+                          )}
                           {onLinkStart && (
                             <button
                               onClick={e => {

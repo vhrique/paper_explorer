@@ -141,7 +141,7 @@ export function ContextPanel({
   ];
 
   return (
-    <div className="flex flex-col h-full bg-white border-l border-gray-200">
+    <div className="relative z-20 flex flex-col h-full bg-white border-l border-gray-200">
       {/* Tabs */}
       <div className="flex border-b border-gray-200 flex-shrink-0">
         {tabs.map(t => (

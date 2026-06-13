@@ -14,7 +14,7 @@ load_dotenv()  # loads .env if present; env vars already set take precedence
 
 from database import (
     execute, execute_returning, fetchall, fetchone,
-    embedding_to_json, json_to_embedding, init_db
+    embedding_to_json, json_to_embedding, init_db, get_db_connection
 )
 from models import (
     ChunkResult, Note, NoteCreate, NoteUpdate,
@@ -345,10 +345,18 @@ def delete_passage(passage_id: int):
 @app.post("/passages/{passage_id}/links/{other_id}", response_model=PassageLink)
 def create_passage_link(passage_id: int, other_id: int):
     p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
-    row = fetchone(
+    
+    conn = get_db_connection()
+    from psycopg2.extras import RealDictCursor
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
         "INSERT INTO passage_links (passage_id_1, passage_id_2) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING *",
         (p1, p2)
     )
+    row = cur.fetchone()
+    conn.commit()
+    conn.close()
+
     if not row:
         row = fetchone(
             "SELECT * FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s",
@@ -402,7 +410,7 @@ def get_paper_links(paper_id: int):
             "remote_passage_id": r["passage_id_2"] if local_is_1 else r["passage_id_1"],
             "remote_passage_text": r["text2"] if local_is_1 else r["text1"],
             "remote_page": r["page2"] if local_is_1 else r["page1"],
-            "remote_rects": r["rects2"] if local_is_1 else r["rects1"],
+            "remote_rects": json.loads((r["rects2"] if local_is_1 else r["rects1"]) or "[]"),
             "remote_paper_id": r["pid2"] if local_is_1 else r["pid1"],
             "remote_paper_title": r["title2"] if local_is_1 else r["title1"],
         })
