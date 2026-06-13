@@ -117,6 +117,12 @@ def _paper_with_meta(row: dict) -> dict:
     return paper
 
 
+@app.get("/papers", response_model=List[Paper])
+def list_all_papers():
+    rows = fetchall("SELECT * FROM papers ORDER BY created_at DESC")
+    return [_paper_with_meta(r) for r in rows]
+
+
 @app.get("/projects/{project_id}/papers", response_model=List[Paper])
 def list_papers(project_id: int):
     rows = fetchall("""
@@ -151,46 +157,24 @@ def get_paper_pdf(paper_id: int):
         raise HTTPException(status_code=404, detail="PDF not found in storage")
 
 
-@app.post("/projects/{project_id}/papers", response_model=Paper)
-def upload_paper(project_id: int, file: UploadFile = File(...)):
-    project = fetchone("SELECT id FROM projects WHERE id = %s", (project_id,))
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    pdf_bytes = file.file.read()
-    title = Path(file.filename).stem
-
-    # Store PDF
-    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/temp/{file.filename}", content_type="application/pdf")
-
-    # Extract DOI from PDF
+def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
+    title = Path(filename).stem
     doi = extract_doi(pdf_bytes)
 
-    # Create paper record
+    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/temp/{filename}", content_type="application/pdf")
     paper = execute_returning(
         "INSERT INTO papers (title, filename, doi) VALUES (%s, %s, %s) RETURNING *",
-        (title, file.filename, doi)
+        (title, filename, doi)
     )
     paper_id = paper["id"]
+    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/{paper_id}/{filename}", content_type="application/pdf")
+    storage.delete(f"pdfs/temp/{filename}")
 
-    # Move to final storage path
-    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/{paper_id}/{file.filename}", content_type="application/pdf")
-    storage.delete(f"pdfs/temp/{file.filename}")
-
-    # Link to project
-    execute(
-        "INSERT INTO paper_projects (paper_id, project_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-        (paper_id, project_id)
-    )
-
-    # Extract and embed chunks in background (fire-and-forget style, synchronous for now)
     try:
         chunks = extract_chunks(pdf_bytes)
         if chunks:
             emb_service = get_embedding_service()
-            texts = [c["text"] for c in chunks]
-            embeddings = emb_service.embed_batch(texts)
-
+            embeddings = emb_service.embed_batch([c["text"] for c in chunks])
             from database import get_db_connection
             conn = get_db_connection()
             cur = conn.cursor()
@@ -205,6 +189,27 @@ def upload_paper(project_id: int, file: UploadFile = File(...)):
     except Exception as e:
         print(f"Chunk extraction/embedding failed: {e}")
 
+    return paper
+
+
+@app.post("/papers", response_model=Paper)
+def upload_paper(file: UploadFile = File(...)):
+    pdf_bytes = file.file.read()
+    paper = _create_paper_from_upload(pdf_bytes, file.filename)
+    return _paper_with_meta(paper)
+
+
+@app.post("/projects/{project_id}/papers", response_model=Paper)
+def upload_paper_to_project(project_id: int, file: UploadFile = File(...)):
+    project = fetchone("SELECT id FROM projects WHERE id = %s", (project_id,))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    pdf_bytes = file.file.read()
+    paper = _create_paper_from_upload(pdf_bytes, file.filename)
+    execute(
+        "INSERT INTO paper_projects (paper_id, project_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (paper["id"], project_id)
+    )
     return _paper_with_meta(paper)
 
 

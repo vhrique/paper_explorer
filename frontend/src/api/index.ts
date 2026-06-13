@@ -91,17 +91,23 @@ export const api = {
   deleteProject: (id: number) => axios.delete(`${BASE}/projects/${id}`),
 
   // Papers
+  listAllPapers: () =>
+    axios.get<Paper[]>(`${BASE}/papers`).then(r => r.data),
   listPapers: (projectId: number) =>
     axios.get<Paper[]>(`${BASE}/projects/${projectId}/papers`).then(r => r.data),
   getPaper: (id: number) => axios.get<Paper>(`${BASE}/papers/${id}`).then(r => r.data),
-  uploadPaper: (projectId: number, file: File) => {
+  uploadPaper: (file: File) => {
     const form = new FormData();
     form.append('file', file);
-    return axios.post<Paper>(`${BASE}/projects/${projectId}/papers`, form).then(r => r.data);
+    return axios.post<Paper>(`${BASE}/papers`, form).then(r => r.data);
   },
   updatePaper: (id: number, data: Partial<Paper>) =>
     axios.patch<Paper>(`${BASE}/papers/${id}`, data).then(r => r.data),
   deletePaper: (id: number) => axios.delete(`${BASE}/papers/${id}`),
+  addPaperToProject: (paperId: number, projectId: number) =>
+    axios.post(`${BASE}/papers/${paperId}/projects/${projectId}`),
+  removePaperFromProject: (paperId: number, projectId: number) =>
+    axios.delete(`${BASE}/papers/${paperId}/projects/${projectId}`),
   getPaperPdfUrl: (id: number) => `${BASE}/papers/${id}/pdf`,
 
   // Passages
