@@ -49,7 +49,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
     if (!connectedSimilar || passages.length === 0) { setPassageLinks([]); return; }
     Promise.all(passages.map(p => api.getPassageLinks(p.id)))
       .then(results => setPassageLinks(results.flat()));
-  }, [connectedSimilar?.paper_id, passages]);
+  }, [connectedSimilar, passages]);
 
   // Mouse tracking + Escape key for linking mode
   useEffect(() => {
