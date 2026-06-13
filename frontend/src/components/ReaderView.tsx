@@ -32,6 +32,8 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [linkingRect, setLinkingRect] = useState<DOMRect | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
   const [passageLinks, setPassageLinks] = useState<PassageLink[]>([]);
+  const [firstLinkedRects, setFirstLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
+  const [secondLinkedRects, setSecondLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
 
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
@@ -173,6 +175,30 @@ export function ReaderView({ paper, project, onBack }: Props) {
       .map(p => ({ page: p.page, rects: p.rects, passageId: p.id })),
   [secondPassages, passageLinks, firstPassageIds]);
 
+  // Pair linked rects from both panels into source→target pairs for the overlay
+  const linkRects = useMemo(() => {
+    const firstMap = new Map(firstLinkedRects.map(r => [r.passageId, r.rect]));
+    const secondMap = new Map(secondLinkedRects.map(r => [r.passageId, r.rect]));
+    const firstIds = new Set(passages.map(p => p.id));
+    const result: { source: DOMRect; target: DOMRect }[] = [];
+    for (const link of passageLinks) {
+      const sourceId = firstIds.has(link.passage_id_1) ? link.passage_id_1 : link.passage_id_2;
+      const targetId = sourceId === link.passage_id_1 ? link.passage_id_2 : link.passage_id_1;
+      const src = firstMap.get(sourceId);
+      const tgt = secondMap.get(targetId);
+      if (src && tgt) result.push({ source: src, target: tgt });
+    }
+    return result;
+  }, [passageLinks, firstLinkedRects, secondLinkedRects, passages]);
+
+  const handleFirstLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
+    setFirstLinkedRects(rects);
+  }, []);
+
+  const handleSecondLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
+    setSecondLinkedRects(rects);
+  }, []);
+
   // Stable arrays for similarity connection lines
   const sourceConnectedPassages = useMemo(() =>
     selectedPassage && connectedSimilar && connectedSimilarList.length > 0
@@ -252,6 +278,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
             linkingTarget={linkingPassage?.panel === 'second'}
             onLinkTarget={linkingPassage?.panel === 'second' ? handleLinkTarget : undefined}
             linkedPassages={secondPanelOpen ? linkedInFirstPanel : undefined}
+            onLinkedRectsChange={secondPanelOpen ? handleFirstLinkedRectsChange : undefined}
             onUnlink={secondPanelOpen ? handleUnlink : undefined}
           />
         </div>
@@ -283,6 +310,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
                 linkingTarget={linkingPassage?.panel === 'first'}
                 onLinkTarget={linkingPassage?.panel === 'first' ? handleLinkTarget : undefined}
                 linkedPassages={linkedInSecondPanel}
+                onLinkedRectsChange={handleSecondLinkedRectsChange}
                 onUnlink={handleUnlink}
               />
             </div>
@@ -306,11 +334,12 @@ export function ReaderView({ paper, project, onBack }: Props) {
         )}
       </div>
 
-      {/* Overlay: similarity lines + rubber-band link line */}
+      {/* Overlay: similarity lines + link lines + rubber-band */}
       <ConnectionOverlay
         sourceRect={sourceRect}
         targetRects={targetRects}
         offscreenRects={offscreenTargetRects}
+        linkRects={linkRects}
         linkingSource={linkingRect}
         linkingMouse={mousePos}
       />
