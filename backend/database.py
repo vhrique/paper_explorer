@@ -128,6 +128,16 @@ def init_db():
             """)
 
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS passage_links (
+                    id SERIAL PRIMARY KEY,
+                    passage_id_1 INTEGER REFERENCES passages(id) ON DELETE CASCADE,
+                    passage_id_2 INTEGER REFERENCES passages(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(passage_id_1, passage_id_2)
+                )
+            """)
+
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS svm_models (
                     id SERIAL PRIMARY KEY,
                     project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,

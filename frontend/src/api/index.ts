@@ -56,6 +56,13 @@ export interface Note {
   tag_ids: number[];
 }
 
+export interface PassageLink {
+  id: number;
+  passage_id_1: number;
+  passage_id_2: number;
+  created_at: string;
+}
+
 export interface SimilarPassage {
   passage_id: number;
   paper_id: number;
@@ -120,6 +127,12 @@ export const api = {
   deletePassage: (id: number) => axios.delete(`${BASE}/passages/${id}`),
   getSimilarPassages: (id: number, limit = 10) =>
     axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit } }).then(r => r.data),
+  getPassageLinks: (id: number) =>
+    axios.get<PassageLink[]>(`${BASE}/passages/${id}/links`).then(r => r.data),
+  createPassageLink: (id: number, otherId: number) =>
+    axios.post<PassageLink>(`${BASE}/passages/${id}/links/${otherId}`).then(r => r.data),
+  deletePassageLink: (id: number, otherId: number) =>
+    axios.delete(`${BASE}/passages/${id}/links/${otherId}`),
 
   // Tags
   listTags: (projectId: number) =>

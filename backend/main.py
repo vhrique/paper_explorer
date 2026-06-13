@@ -18,7 +18,7 @@ from database import (
 )
 from models import (
     ChunkResult, Note, NoteCreate, NoteUpdate,
-    Paper, PaperUpdate, Passage, PassageCreate, PassageUpdate,
+    Paper, PaperUpdate, Passage, PassageCreate, PassageLink, PassageUpdate,
     Project, ProjectCreate, ProjectUpdate,
     SearchQuery, SearchResponse, SimilarPassage, Tag, TagCreate, TagUpdate,
 )
@@ -340,6 +340,36 @@ def delete_passage(passage_id: int):
         if not still_used:
             execute("DELETE FROM tags WHERE id = %s", (tag_id,))
     return {"message": "Passage deleted"}
+
+
+@app.post("/passages/{passage_id}/links/{other_id}", response_model=PassageLink)
+def create_passage_link(passage_id: int, other_id: int):
+    p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
+    row = fetchone(
+        "INSERT INTO passage_links (passage_id_1, passage_id_2) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING *",
+        (p1, p2)
+    )
+    if not row:
+        row = fetchone(
+            "SELECT * FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s",
+            (p1, p2)
+        )
+    return row
+
+
+@app.get("/passages/{passage_id}/links", response_model=List[PassageLink])
+def get_passage_links(passage_id: int):
+    return fetchall(
+        "SELECT * FROM passage_links WHERE passage_id_1 = %s OR passage_id_2 = %s ORDER BY created_at DESC",
+        (passage_id, passage_id)
+    )
+
+
+@app.delete("/passages/{passage_id}/links/{other_id}")
+def delete_passage_link(passage_id: int, other_id: int):
+    p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
+    execute("DELETE FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s", (p1, p2))
+    return {"message": "Link deleted"}
 
 
 @app.get("/passages/{passage_id}/similar", response_model=List[SimilarPassage])
