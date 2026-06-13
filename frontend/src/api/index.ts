@@ -63,6 +63,20 @@ export interface PassageLink {
   created_at: string;
 }
 
+export interface PassageLinkDetail {
+  id: number;
+  local_passage_id: number;
+  local_passage_text: string;
+  local_page: number;
+  remote_passage_id: number;
+  remote_passage_text: string;
+  remote_page: number;
+  remote_rects: Rect[];
+  remote_paper_id: number;
+  remote_paper_title: string;
+  created_at: string;
+}
+
 export interface SimilarPassage {
   passage_id: number;
   paper_id: number;
@@ -129,6 +143,8 @@ export const api = {
     axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit } }).then(r => r.data),
   getPassageLinks: (id: number) =>
     axios.get<PassageLink[]>(`${BASE}/passages/${id}/links`).then(r => r.data),
+  getPaperLinks: (paperId: number) =>
+    axios.get<PassageLinkDetail[]>(`${BASE}/papers/${paperId}/links`).then(r => r.data),
   createPassageLink: (id: number, otherId: number) =>
     axios.post<PassageLink>(`${BASE}/passages/${id}/links/${otherId}`).then(r => r.data),
   deletePassageLink: (id: number, otherId: number) =>

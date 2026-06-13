@@ -111,6 +111,20 @@ class PassageLink(BaseModel):
     created_at: datetime
 
 
+class PassageLinkDetail(BaseModel):
+    id: int
+    local_passage_id: int
+    local_passage_text: str
+    local_page: int
+    remote_passage_id: int
+    remote_passage_text: str
+    remote_page: int
+    remote_rects: List[dict]
+    remote_paper_id: int
+    remote_paper_title: str
+    created_at: datetime
+
+
 class SimilarPassage(BaseModel):
     passage_id: int
     paper_id: int

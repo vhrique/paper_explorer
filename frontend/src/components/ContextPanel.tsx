@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { api, type ChunkResult, type Note, type Passage, type SearchResponse, type SimilarPassage, type Tag } from '../api';
-import { Highlighter, Search, Link2, StickyNote, Tag as TagIcon, Trash2, Plus, X } from 'lucide-react';
+import { api, type ChunkResult, type Note, type Passage, type PassageLinkDetail, type Rect, type SearchResponse, type SimilarPassage, type Tag } from '../api';
+import { Highlighter, Search, Link2, Link, StickyNote, Tag as TagIcon, Trash2, Plus, X } from 'lucide-react';
 
-type Tab = 'passages' | 'similar' | 'search' | 'notes';
+type Tab = 'passages' | 'similar' | 'search' | 'notes' | 'links';
 
 interface Props {
   paperId: number;
@@ -13,11 +13,14 @@ interface Props {
   onPassageDeleted: (id: number) => void;
   onPassageUpdated: (passage: Passage) => void;
   onSimilarClick?: (s: SimilarPassage, allFromPaper: SimilarPassage[]) => void;
+  onOpenLinkedPaper?: (paperId: number, paperTitle: string, page: number, rects: Rect[]) => void;
+  onLinkDeleted?: (linkId: number) => void;
 }
 
 export function ContextPanel({
   paperId, projectId, passages, selectedPassage,
   onSelectPassage, onPassageDeleted, onPassageUpdated, onSimilarClick,
+  onOpenLinkedPaper, onLinkDeleted,
 }: Props) {
   const [tab, setTab] = useState<Tab>('passages');
   const [tags, setTags] = useState<Tag[]>([]);
@@ -31,6 +34,8 @@ export function ContextPanel({
   const [newTagName, setNewTagName] = useState('');
   const [addingTag, setAddingTag] = useState(false);
   const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
+  const [links, setLinks] = useState<PassageLinkDetail[]>([]);
+  const [linksLoading, setLinksLoading] = useState(false);
 
   useEffect(() => {
     api.listTags(projectId).then(setTags);
@@ -51,6 +56,16 @@ export function ContextPanel({
     if (!selectedPassage) { setNotes([]); return; }
     api.getPassageNotes(selectedPassage.id).then(setNotes);
   }, [selectedPassage?.id]);
+
+  // Load links when the links tab is active
+  useEffect(() => {
+    if (tab !== 'links') return;
+    setLinksLoading(true);
+    api.getPaperLinks(paperId)
+      .then(setLinks)
+      .catch(() => setLinks([]))
+      .finally(() => setLinksLoading(false));
+  }, [tab, paperId, passages.length]);
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
@@ -107,11 +122,18 @@ export function ContextPanel({
     onPassageDeleted(id);
   };
 
+  const handleDeleteLink = async (link: PassageLinkDetail) => {
+    await api.deletePassageLink(link.local_passage_id, link.remote_passage_id);
+    setLinks(prev => prev.filter(l => l.id !== link.id));
+    onLinkDeleted?.(link.id);
+  };
+
   const appliedTagIds = new Set(selectedPassage?.tags.map(t => t.id) ?? []);
   const availableTags = tags.filter(t => !appliedTagIds.has(t.id) && t.type === 'content');
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'passages', label: 'Highlights', icon: <Highlighter size={14} /> },
+    { id: 'links', label: 'Links', icon: <Link size={14} /> },
     { id: 'similar', label: 'Similar', icon: <Link2 size={14} /> },
     { id: 'search', label: 'Search', icon: <Search size={14} /> },
     { id: 'notes', label: 'Notes', icon: <StickyNote size={14} /> },
@@ -231,6 +253,50 @@ export function ContextPanel({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* LINKS TAB */}
+        {tab === 'links' && (
+          <div className="space-y-3">
+            {linksLoading && (
+              <p className="text-xs text-gray-400 text-center py-8 animate-pulse">Loading links…</p>
+            )}
+            {!linksLoading && links.length === 0 && (
+              <p className="text-xs text-gray-400 text-center py-8">No manual links yet. Use the link button in a highlight toolbar to connect passages across papers.</p>
+            )}
+            {!linksLoading && links.map(link => (
+              <div key={link.id} className="border border-gray-200 rounded-xl overflow-hidden">
+                {/* Local passage */}
+                <div className="p-3 bg-gray-50 border-b border-gray-100">
+                  <p className="text-xs text-gray-400 mb-1">From · page {link.local_page + 1}</p>
+                  <p className="text-xs text-gray-700 line-clamp-2">{link.local_passage_text}</p>
+                </div>
+                {/* Remote passage */}
+                <div className="p-3">
+                  <div className="flex items-center gap-1 mb-1">
+                    <span className="text-teal-500 text-xs">→</span>
+                    <p className="text-xs font-medium text-teal-700 truncate">{link.remote_paper_title}</p>
+                    <span className="text-xs text-gray-400 flex-shrink-0">· p.{link.remote_page + 1}</span>
+                  </div>
+                  <p className="text-xs text-gray-600 line-clamp-2">{link.remote_passage_text}</p>
+                  <div className="flex items-center gap-2 mt-2">
+                    <button
+                      onClick={() => onOpenLinkedPaper?.(link.remote_paper_id, link.remote_paper_title, link.remote_page, link.remote_rects)}
+                      className="px-2 py-1 text-xs bg-teal-50 text-teal-700 border border-teal-200 rounded-lg hover:bg-teal-100 transition-colors"
+                    >
+                      Open paper
+                    </button>
+                    <button
+                      onClick={() => handleDeleteLink(link)}
+                      className="ml-auto p-1 text-gray-300 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
