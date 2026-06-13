@@ -1,130 +1,145 @@
-# Paper Explorer
+# Paper Explorer v2
 
-A full-stack web app for exploring, annotating, and discovering relationships in academic papers. Upload PDFs, view them as interactive knowledge graphs, tag chunks semantically, and find similar content across your library.
+A full-stack web application for exploring, annotating, and linking academic papers. Upload PDFs, highlight passages, tag them, search/ask questions about them, and discover similar passages or establish manual links across papers in your projects.
 
 ## Architecture
 
 ```
 paper_explorer/
-├── backend/          # FastAPI Python server
-│   ├── main.py       # All API routes
-│   ├── database.py   # PostgreSQL/pgvector helpers
-│   ├── models.py     # Pydantic models
+├── backend/                  # FastAPI Python server
+│   ├── main.py               # API endpoints
+│   ├── database.py           # PostgreSQL connection & schema initialization
+│   ├── models.py             # Pydantic schemas
 │   └── services/
-│       ├── pdf_processor.py      # PDF parsing → nodes (text + image chunks)
-│       ├── embedding.py          # SentenceTransformer embeddings (intfloat/e5-large-v2)
-│       ├── similarity.py         # Cosine similarity + LLM-based excerpt extraction
-│       ├── tag_service.py        # SVM-based tag suggestion model
-│       ├── llm_service.py        # Ollama/Gemma3 client (OpenAI-compatible API)
-│       ├── storage.py            # MinIO/S3 file storage
-│       ├── graph.py              # Graph layout computation
-│       ├── discovery.py          # Paper discovery via Semantic Scholar
-│       ├── semantic_scholar.py   # Semantic Scholar API client
-│       └── crossref_service.py   # CrossRef DOI metadata + references
-├── frontend/         # React + TypeScript + Vite
+│       ├── pdf_processor.py  # PDF parsing -> text chunks & metadata (PyMuPDF)
+│       ├── embedding.py      # OpenAI-compatible embedding service client
+│       ├── similarity.py     # NumPy-based Cosine similarity helper
+│       ├── llm_service.py    # OpenAI-compatible LLM service client
+│       └── storage.py        # Storage abstraction (Local or Google Cloud Storage)
+├── frontend/                 # React + TypeScript + Vite + Tailwind CSS
 │   └── src/
-│       ├── App.tsx
-│       ├── api/index.ts          # All API calls to backend
-│       └── components/           # UI components
+│       ├── App.tsx           # Switcher between LibraryView and ReaderView
+│       ├── api/
+│       │   └── index.ts      # Axios API definition and typings
+│       └── components/
+│           ├── LibraryView.tsx       # Project and Paper listing, uploads, project assignment
+│           ├── ReaderView.tsx        # Main double-pane PDF reading interface
+│           ├── PDFPanel.tsx          # PDF renderer, text highlighting, hover actions
+│           ├── ContextPanel.tsx      # Sidebar with Highlights, Links, Similarities, Q&A, and Notes
+│           └── ConnectionOverlay.tsx # SVG overlay rendering similarity and link lines
 └── docker-compose.yml
 ```
 
 ## Running the Stack
 
-Everything runs via Docker Compose. Requires an NVIDIA GPU (configured for GPU passthrough).
+Everything runs via Docker Compose:
 
 ```bash
 docker compose up --build
 ```
 
-Services:
-- **Frontend**: http://localhost:5173 (Vite dev server with hot-reload)
-- **Backend API**: http://localhost:8000 (FastAPI, auto-reloads from mounted volume)
-- **MinIO console**: http://localhost:9001 (admin/minioadmin)
-- **PostgreSQL**: localhost:5432 (user/password/paper_explorer)
-- **Ollama**: http://localhost:11434 (gemma3:4b pulled automatically; custom `gemma3-32k` model with 32k context created from `backend/Modelfile`)
+### Services
+- **Frontend**: `http://localhost:5173` (Vite dev server with hot-reload)
+- **Backend API**: `http://localhost:8000` (FastAPI, auto-reloads from mounted volume)
+- **PostgreSQL**: `localhost:5432` (user/password/paper_explorer)
+- **Ollama / Local LLM**: Configurable via environment variables.
 
-On first boot: Ollama pulls gemma3:4b and creates the `gemma3-32k` model — this takes a few minutes.
+---
 
-## Key Environment Variables (set in docker-compose.yml)
+## Configuration & Environment Variables
 
-| Variable | Default |
-|---|---|
-| `DATABASE_URL` | `postgresql://user:password@postgres:5432/paper_explorer` |
-| `MINIO_ENDPOINT` | `minio:9000` |
-| `MINIO_ACCESS_KEY` | `minioadmin` |
-| `MINIO_SECRET_KEY` | `minioadmin` |
-| `MINIO_BUCKET_NAME` | `paper-explorer` |
-| `OLLAMA_BASE_URL` | `http://ollama:11434` |
+Key backend configurations are loaded in `backend/main.py` via python-dotenv:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://user:password@localhost:5432/paper_explorer` | DB connection string |
+| `STORAGE_BACKEND` | `local` | `'local'` or `'gcs'` |
+| `LOCAL_STORAGE_PATH` | `./storage` | Location to save uploaded PDFs locally |
+| `GCS_BUCKET_NAME` | `paper-explorer` | GCS Bucket Name (if using Google Cloud Storage) |
+| `EMBEDDING_BASE_URL` | `http://localhost:1234/v1` | Base URL for OpenAI-compatible embedding API |
+| `EMBEDDING_API_KEY` | `lm-studio` | API Key for embedding |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model identifier |
+| `LLM_BASE_URL` | `http://localhost:1234/v1` | Base URL for OpenAI-compatible LLM API |
+| `LLM_API_KEY` | `lm-studio` | API Key for LLM |
+| `LLM_MODEL` | `gemma3` | LLM model identifier |
+
+---
 
 ## Data Model
 
-PostgreSQL with pgvector extension. Schema created automatically on startup (`database.py:init_db`).
+PostgreSQL database initialized on startup (`database.py:init_db`).
 
 - **projects** — top-level containers
-- **papers** — PDFs uploaded to a project; stores DOI, abstract, color
-- **nodes** — chunks extracted from papers (type: `text` | `image` | `note`); each has a `vector(1024)` embedding; IVFFlat cosine index
-- **tags** — `global` (cross-project) or `local` (per-project)
-- **node_tags** — many-to-many: nodes ↔ tags
-- **links** — manual connections between nodes
-- **notes** — free-text annotations; also stored as nodes with embeddings
-- **paper_references** / **paper_citations** — populated from CrossRef + Semantic Scholar on upload
-- **svm_models** — metadata for trained tag-suggestion models (actual model pickles in MinIO)
+- **papers** — PDF records; stores title, filename, DOI, and abstract
+- **paper_projects** — many-to-many junction table linking papers to projects
+- **tags** — content or paper tags (scoped per-project or global)
+- **paper_tags** — many-to-many junction table between papers and tags
+- **passages** — user highlights (text block, page number, coordinates `rects` stored as JSON, and serialized embedding vector)
+- **passage_tags** — many-to-many junction table between passages and tags
+- **notes** — comments annotated on passages (or tags) with serialized embeddings
+- **note_passages** / **note_tags** — connection tables mapping notes to passages and tags
+- **chunks** — full-text blocks automatically parsed from PDFs on upload, used for Q&A vector search
+- **passage_links** — manual bidirectional links established between passages
+- **svm_models** — metadata for SVM-based classifiers (legacy)
 
-## Backend Services
+---
+
+## Core Backend Logic
 
 ### PDF Processing (`pdf_processor.py`)
-Extracts text blocks and images from PDFs via PyMuPDF, assigns them UUIDs, stores images in MinIO.
+Utilizes `PyMuPDF` (`fitz`) to extract text blocks and compute normalized bounding box coordinates (`x`, `y`, `width`, `height`) for each chunk. It also attempts to extract DOIs from the first two pages.
 
 ### Embeddings (`embedding.py`)
-Uses `intfloat/e5-large-v2` (1024-dim) via `sentence-transformers`. Batch-processes all nodes after upload. Images are also embedded (model supports multimodal input).
+Sends text to an OpenAI-compatible embedding endpoint (e.g., LM Studio, Ollama, OpenAI) to generate vector embeddings. Used for highlights, note content, and parsed PDF chunks.
 
-### Similarity Search (`similarity.py`)
-1. Cosine similarity over pgvector embeddings (max-similarity across multiple query vectors)
-2. LLM excerpt extraction: sends top-k nodes to Gemma3 to extract relevant passages
-3. Re-embeds those passages and re-runs search (improving retrieval recall)
-4. Optional cross-encoder reranking (currently disabled — `self.cross_encoder = None`)
+### Similarity Searching (`similarity.py`)
+Applies Cosine Similarity over candidate text/passage embeddings in Python using NumPy:
+$$\text{similarity} = \frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\| \|\mathbf{v}\|}$$
+Used to display related highlights/chunks in the "Similar" tab.
 
-### Tag Suggestions (`tag_service.py`)
-- One-vs-rest SVM with RBF kernel trained on tagged nodes
-- Separate models for global vs local tags
-- Models pickled and stored in MinIO at `models/project_{id}/svm_model_{global|local}.pkl`
-- Decision function scores stored in `nodes.tag_scores` (JSON) after training
-- `use_global_context=True` pulls tagged nodes from other projects as additional training data
+### Q&A vector search (`main.py:search_paper`)
+1. Embeds the user's question.
+2. Finds the top-k most similar text chunks within the paper via Python-based cosine similarity.
+3. Formulates a prompt appending the context from the matching chunks.
+4. Feeds the prompt to the LLM service to synthesize a concise, source-based answer.
 
-### LLM Service (`llm_service.py`)
-Singleton wrapping Ollama via the OpenAI Python SDK. Default model: `gemma3-32k`. Used for excerpt extraction in similarity search.
+---
 
-### Metadata Enrichment (on PDF upload)
-1. DOI extracted from PDF
-2. CrossRef: fetches abstract + outgoing references
-3. Semantic Scholar: fetches incoming citations (up to 50)
+## Frontend Components
 
-## Frontend
+The React UI is split into two primary modes controlled by `App.tsx`:
+1. **LibraryView.tsx**:
+   - Manage projects (create, delete).
+   - Upload papers, delete papers, and assign them to projects.
+   - Click a paper in a project to open it in `ReaderView`.
+2. **ReaderView.tsx**:
+   - Manages layout with a header, side-by-side PDF panels, and the `ContextPanel` sidebar.
+   - **PDFPanel.tsx**:
+     - Renders PDF pages using `react-pdf`.
+     - Supports text selection to trigger highlighting with adjustable colors.
+     - Displays tags, toolbar actions (delete, tag, link), and draws overlays.
+   - **ContextPanel.tsx**:
+     - Sidebar tracking information relative to the active highlight selection.
+     - Tabs:
+       - **Highlights**: Browse all highlights in the paper.
+       - **Links**: Manage manual links connecting to other papers.
+       - **Similar**: List automatically retrieved similar segments (highlights and chunks) across other papers in the project.
+       - **Search**: Perform semantic Q&A about the document.
+       - **Notes**: Read and write annotations on the selected highlight.
+   - **ConnectionOverlay.tsx**:
+     - Standard SVG canvas layered on top of both panels.
+     - Computes cubic Bezier curves in absolute DOM screen space to visually connect passages between the left and right PDF panels.
+     - Draws purple lines for semantic similarity and solid teal lines for manual passage links.
 
-React 19 + TypeScript + Vite + Tailwind CSS.
-
-Key components:
-- `GraphView.tsx` — ReactFlow canvas showing nodes as a 2D graph (PCA layout)
-- `DiscoveryGraph.tsx` — graph for paper discovery recommendations
-- `PapersSidebar.tsx` — paper list and upload
-- `DetailPanel.tsx` — node detail view with tagging
-- `SimilarityModal.tsx` — similar nodes search triggered from a note
-- `AdvancedViewPanel.tsx` — tag training, SVM score-based layout
-- `PDFViewer.tsx` — in-app PDF viewer
-
-API base URL is proxied through Vite config to `http://backend:8000`.
-
-## No Tests
-
-There is no test suite. `backend/test_llm.py` is a one-off manual script.
+---
 
 ## Common Tasks
 
-**Add a new API endpoint**: add a route to `backend/main.py`, add any Pydantic models to `models.py`, add DB helpers to `database.py` if needed.
+### Adding a new endpoint
+1. Define any request/response validation schemas in `backend/models.py`.
+2. Write the FastAPI endpoint handler in `backend/main.py`.
+3. If necessary, write custom SQL utility functions in `backend/database.py`.
+4. Register the client method inside `frontend/src/api/index.ts`.
 
-**Change the embedding model**: edit `EmbeddingService.__init__` in `services/embedding.py`. Changing the model changes vector dimensions — you'll need to drop and recreate the `nodes` table and re-process all PDFs.
-
-**Change the LLM model**: edit `LLMService.__init__` default `model` arg in `services/llm_service.py` and update the model pulled in `docker-compose.yml`.
-
-**Add a new frontend component**: add to `frontend/src/components/`, wire API calls through `frontend/src/api/index.ts`.
+### Changing the Embedding or LLM Provider
+Set the environment variables `EMBEDDING_BASE_URL` / `LLM_BASE_URL` and `EMBEDDING_MODEL` / `LLM_MODEL` to match your local Ollama instance, LM Studio endpoint, or OpenAI API credentials in `docker-compose.yml` or your `.env` configuration file.

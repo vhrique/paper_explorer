@@ -24,7 +24,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [secondSelectedPassage, setSecondSelectedPassage] = useState<Passage | null>(null);
   const [secondJumpToPassage, setSecondJumpToPassage] = useState<{ page: number; rect: Rect } | undefined>();
   const [sourceRect, setSourceRect] = useState<DOMRect | null>(null);
-  const [targetRects, setTargetRects] = useState<DOMRect[]>([]);
+  const [targetRects, setTargetRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
   const [offscreenTargetRects, setOffscreenTargetRects] = useState<DOMRect[]>([]);
 
   // Linking state
@@ -35,6 +35,20 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [firstLinkedRects, setFirstLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
   const [secondLinkedRects, setSecondLinkedRects] = useState<{ passageId: number; rect: DOMRect }[]>([]);
   const [linksVersion, setLinksVersion] = useState(0);
+
+  // Toggles and Hovers
+  const [showSimilarityLines, setShowSimilarityLines] = useState(true);
+  const [showManualLinks, setShowManualLinks] = useState(true);
+  const [hoveredPassageId, setHoveredPassageId] = useState<number | null>(null);
+  const [similaritySelector, setSimilaritySelector] = useState<{
+    passage: Passage;
+    papers: {
+      paperId: number;
+      title: string;
+      maxSimilarity: number;
+      matches: SimilarPassage[];
+    }[];
+  } | null>(null);
 
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
@@ -202,13 +216,15 @@ export function ReaderView({ paper, project, onBack }: Props) {
     const firstMap = new Map(firstLinkedRects.map(r => [r.passageId, r.rect]));
     const secondMap = new Map(secondLinkedRects.map(r => [r.passageId, r.rect]));
     const firstIds = new Set(passages.map(p => p.id));
-    const result: { source: DOMRect; target: DOMRect }[] = [];
+    const result: { source: DOMRect; target: DOMRect; sourceId: number; targetId: number }[] = [];
     for (const link of passageLinks) {
       const sourceId = firstIds.has(link.passage_id_1) ? link.passage_id_1 : link.passage_id_2;
       const targetId = sourceId === link.passage_id_1 ? link.passage_id_2 : link.passage_id_1;
       const src = firstMap.get(sourceId);
       const tgt = secondMap.get(targetId);
-      if (src && tgt) result.push({ source: src, target: tgt });
+      if (src && tgt) {
+        result.push({ source: src, target: tgt, sourceId, targetId });
+      }
     }
     return result;
   }, [passageLinks, firstLinkedRects, secondLinkedRects, passages]);
@@ -223,25 +239,72 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   // Stable arrays for similarity connection lines
   const sourceConnectedPassages = useMemo(() =>
-    selectedPassage && connectedSimilar && connectedSimilarList.length > 0
-      ? [{ page: selectedPassage.page, rects: selectedPassage.rects, highlight: false }]
+    selectedPassage && connectedSimilar
+      ? [{ page: selectedPassage.page, rects: selectedPassage.rects, highlight: false, passageId: selectedPassage.id }]
       : [],
-  [selectedPassage, connectedSimilar, connectedSimilarList]);
+  [selectedPassage, connectedSimilar]);
 
   const targetConnectedPassages = useMemo(() =>
-    sourceRect ? connectedSimilarList.map(s => ({ page: s.page, rects: s.rects, highlight: true })) : [],
-  [connectedSimilarList, sourceRect]);
+    sourceRect && selectedPassage
+      ? connectedSimilarList.map(s => ({ page: s.page, rects: s.rects, highlight: true, passageId: s.passage_id }))
+      : [],
+  [connectedSimilarList, sourceRect, selectedPassage]);
 
-  const handleSourceRectsChange = useCallback((rects: DOMRect[]) => {
-    setSourceRect(rects[0] ?? null);
+  const handleSourceRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
+    setSourceRect(rects[0]?.rect ?? null);
   }, []);
 
   const secondPanelOpen = !!connectedSimilar;
 
+  const handlePassageHover = useCallback((id: number | null) => {
+    setHoveredPassageId(id);
+  }, []);
+
+  const handleFindSimilar = useCallback(async (passage: Passage) => {
+    setSelectedPassage(passage);
+    const results = await api.getSimilarPassages(passage.id);
+    
+    // Group by paper
+    const paperGroups: { [key: number]: SimilarPassage[] } = {};
+    for (const s of results) {
+      (paperGroups[s.paper_id] ??= []).push(s);
+    }
+
+    const papersList = Object.keys(paperGroups).map(key => {
+      const id = parseInt(key);
+      const matches = paperGroups[id];
+      const maxSim = Math.max(...matches.map(m => m.similarity));
+      return {
+        paperId: id,
+        title: matches[0].paper_title,
+        maxSimilarity: maxSim,
+        matches: matches
+      };
+    }).sort((a, b) => b.maxSimilarity - a.maxSimilarity);
+
+    if (papersList.length === 0) {
+      alert("No similar passages found in other papers of this project.");
+      return;
+    }
+
+    setSimilaritySelector({ passage, papers: papersList });
+  }, []);
+
+  const handleSelectSimilarityPaper = (paperId: number, title: string, matches: SimilarPassage[]) => {
+    const topMatch = matches[0];
+    setConnectedSimilar(topMatch);
+    setConnectedSimilarList(matches);
+    setSimilaritySelector(null);
+    if (topMatch.rects[0]) {
+      setSecondJumpToPassage({ page: topMatch.page, rect: topMatch.rects[0] });
+      setTimeout(() => setSecondJumpToPassage(undefined), 100);
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       {/* Header */}
-      <header className="flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0">
+      <header className="relative z-20 flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0">
         <button onClick={onBack} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
           <ArrowLeft size={18} className="text-gray-500" />
         </button>
@@ -272,6 +335,27 @@ export function ReaderView({ paper, project, onBack }: Props) {
             </button>
           </div>
         )}
+        {/* Toggle controls */}
+        <div className="flex items-center gap-4 border-r border-gray-200 pr-3 mr-1">
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showSimilarityLines}
+              onChange={e => setShowSimilarityLines(e.target.checked)}
+              className="w-3.5 h-3.5 rounded text-purple-600 focus:ring-purple-400 border-gray-300"
+            />
+            <span className="text-xs font-medium text-gray-600">Similarities</span>
+          </label>
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showManualLinks}
+              onChange={e => setShowManualLinks(e.target.checked)}
+              className="w-3.5 h-3.5 rounded text-teal-600 focus:ring-teal-400 border-gray-300"
+            />
+            <span className="text-xs font-medium text-gray-600">Manual Links</span>
+          </label>
+        </div>
         <button
           onClick={() => setContextOpen(o => !o)}
           className={`p-1.5 rounded-lg transition-colors ${contextOpen ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-400'}`}
@@ -302,13 +386,15 @@ export function ReaderView({ paper, project, onBack }: Props) {
             linkedPassages={secondPanelOpen ? linkedInFirstPanel : undefined}
             onLinkedRectsChange={secondPanelOpen ? handleFirstLinkedRectsChange : undefined}
             onUnlink={secondPanelOpen ? handleUnlink : undefined}
+            onFindSimilar={handleFindSimilar}
+            onPassageHover={handlePassageHover}
           />
         </div>
 
         {/* Second PDF */}
         {connectedSimilar && (
           <div className="flex-1 min-w-0 flex flex-col">
-            <div className="px-3 py-1.5 bg-purple-50 border-b border-purple-200 flex-shrink-0">
+            <div className="relative z-20 px-3 py-1.5 bg-purple-50 border-b border-purple-200 flex-shrink-0">
               <p className="text-xs text-purple-700 font-medium truncate">{connectedSimilar.paper_title}</p>
               <p className="text-xs text-purple-400">
                 {connectedSimilarList.length} similar passage{connectedSimilarList.length !== 1 ? 's' : ''} · top {Math.round(connectedSimilar.similarity * 100)}%
@@ -334,6 +420,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
                 linkedPassages={linkedInSecondPanel}
                 onLinkedRectsChange={handleSecondLinkedRectsChange}
                 onUnlink={handleUnlink}
+                onPassageHover={handlePassageHover}
               />
             </div>
           </div>
@@ -362,12 +449,50 @@ export function ReaderView({ paper, project, onBack }: Props) {
       {/* Overlay: similarity lines + link lines + rubber-band */}
       <ConnectionOverlay
         sourceRect={sourceRect}
-        targetRects={targetRects}
-        offscreenRects={offscreenTargetRects}
-        linkRects={linkRects}
+        targetRects={showSimilarityLines ? targetRects : []}
+        linkRects={showManualLinks ? linkRects : []}
         linkingSource={linkingRect}
         linkingMouse={mousePos}
+        hoveredPassageId={hoveredPassageId}
+        selectedPassageId={selectedPassage?.id}
       />
+
+      {/* Modal for selecting paper to open for similarities */}
+      {similaritySelector && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-800">Compare Similarities</h3>
+              <button
+                onClick={() => setSimilaritySelector(null)}
+                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Select a paper in the project to compare against:
+            </p>
+            <div className="space-y-1.5 max-h-60 overflow-y-auto">
+              {similaritySelector.papers.map(p => (
+                <button
+                  key={p.paperId}
+                  onClick={() => handleSelectSimilarityPaper(p.paperId, p.title, p.matches)}
+                  className="w-full text-left p-3 border border-gray-100 hover:border-purple-300 hover:bg-purple-50 transition-colors flex items-center justify-between rounded-xl"
+                >
+                  <div className="min-w-0 pr-3">
+                    <p className="text-xs font-semibold text-gray-700 truncate">{p.title}</p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">{p.matches.length} matching passage{p.matches.length !== 1 ? 's' : ''}</p>
+                  </div>
+                  <span className="text-xs px-2 py-0.5 bg-purple-50 text-purple-600 border border-purple-100 rounded-full font-medium flex-shrink-0">
+                    {Math.round(p.maxSimilarity * 100)}% match
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
