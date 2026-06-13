@@ -12,11 +12,12 @@ interface Props {
   onSelectPassage: (passage: Passage) => void;
   onPassageDeleted: (id: number) => void;
   onPassageUpdated: (passage: Passage) => void;
+  onSimilarClick?: (s: SimilarPassage, allFromPaper: SimilarPassage[]) => void;
 }
 
 export function ContextPanel({
   paperId, projectId, passages, selectedPassage,
-  onSelectPassage, onPassageDeleted, onPassageUpdated,
+  onSelectPassage, onPassageDeleted, onPassageUpdated, onSimilarClick,
 }: Props) {
   const [tab, setTab] = useState<Tab>('passages');
   const [tags, setTags] = useState<Tag[]>([]);
@@ -29,6 +30,7 @@ export function ContextPanel({
   const [newNote, setNewNote] = useState('');
   const [newTagName, setNewTagName] = useState('');
   const [addingTag, setAddingTag] = useState(false);
+  const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
 
   useEffect(() => {
     api.listTags(projectId).then(setTags);
@@ -61,25 +63,26 @@ export function ContextPanel({
     }
   };
 
-  const handleAddTag = async (tag: Tag) => {
-    if (!selectedPassage) return;
-    await api.addPassageTag(selectedPassage.id, tag.id);
-    onPassageUpdated({ ...selectedPassage, tags: [...selectedPassage.tags, tag] });
+  const handleAddTag = async (tag: Tag, passage: Passage) => {
+    await api.addPassageTag(passage.id, tag.id);
+    onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
   };
 
-  const handleRemoveTag = async (tagId: number) => {
-    if (!selectedPassage) return;
-    await api.removePassageTag(selectedPassage.id, tagId);
-    onPassageUpdated({ ...selectedPassage, tags: selectedPassage.tags.filter(t => t.id !== tagId) });
+  const handleRemoveTag = async (tagId: number, passage: Passage) => {
+    await api.removePassageTag(passage.id, tagId);
+    onPassageUpdated({ ...passage, tags: passage.tags.filter(t => t.id !== tagId) });
+    const stillUsed = passages.some(p => p.id !== passage.id && p.tags.some(t => t.id === tagId));
+    if (!stillUsed) setTags(prev => prev.filter(t => t.id !== tagId));
   };
 
-  const handleCreateTag = async () => {
+  const handleCreateTag = async (passage?: Passage) => {
     if (!newTagName.trim()) return;
     const tag = await api.createTag(newTagName.trim(), 'content', projectId);
     setTags(prev => [...prev, tag]);
     setNewTagName('');
     setAddingTag(false);
-    if (selectedPassage) handleAddTag(tag);
+    const target = passage ?? selectedPassage;
+    if (target) handleAddTag(tag, target);
   };
 
   const handleAddNote = async () => {
@@ -141,41 +144,93 @@ export function ContextPanel({
             {passages.length === 0 && (
               <p className="text-xs text-gray-400 text-center py-8">No highlights yet. Select text in the PDF to highlight it.</p>
             )}
-            {passages.map(passage => (
-              <div
-                key={passage.id}
-                onClick={() => onSelectPassage(passage)}
-                className={`p-3 rounded-xl border cursor-pointer transition-all group ${
-                  selectedPassage?.id === passage.id
-                    ? 'border-blue-300 bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300 bg-white'
-                }`}
-              >
-                <div className="flex items-start gap-2">
-                  <div className="w-1 rounded-full flex-shrink-0 mt-0.5 h-full min-h-[2rem]"
-                    style={{ backgroundColor: passage.color }} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-gray-700 line-clamp-3">{passage.text}</p>
-                    <p className="text-xs text-gray-400 mt-1">Page {passage.page + 1}</p>
-                    {passage.tags.length > 0 && (
+            {passages.map(passage => {
+              const isTagging = taggingPassageId === passage.id;
+              const passageTagIds = new Set(passage.tags.map(t => t.id));
+              const cardAvailableTags = tags.filter(t => !passageTagIds.has(t.id) && t.type === 'content');
+              return (
+                <div
+                  key={passage.id}
+                  onClick={() => onSelectPassage(passage)}
+                  className={`p-3 rounded-xl border cursor-pointer transition-all group ${
+                    selectedPassage?.id === passage.id
+                      ? 'border-blue-300 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <div className="w-1 rounded-full flex-shrink-0 mt-0.5 h-full min-h-[2rem]"
+                      style={{ backgroundColor: passage.color }} />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-gray-700 line-clamp-3">{passage.text}</p>
+                      <p className="text-xs text-gray-400 mt-1">Page {passage.page + 1}</p>
                       <div className="flex flex-wrap gap-1 mt-1.5">
                         {passage.tags.map(tag => (
-                          <span key={tag.id} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
+                          <span
+                            key={tag.id}
+                            onClick={e => e.stopPropagation()}
+                            className="flex items-center gap-1 px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-xs"
+                          >
                             {tag.name}
+                            <button onClick={e => { e.stopPropagation(); handleRemoveTag(tag.id, passage); }}>
+                              <X size={9} className="text-gray-400 hover:text-red-400" />
+                            </button>
                           </span>
                         ))}
+                        <button
+                          onClick={e => { e.stopPropagation(); setTaggingPassageId(isTagging ? null : passage.id); setNewTagName(''); setAddingTag(false); }}
+                          className="flex items-center gap-0.5 px-1.5 py-0.5 border border-dashed border-gray-300 rounded text-xs text-gray-400 hover:border-blue-400 hover:text-blue-500 transition-colors"
+                        >
+                          <Plus size={9} /> tag
+                        </button>
                       </div>
-                    )}
+                      {isTagging && (
+                        <div className="mt-2 pt-2 border-t border-gray-100" onClick={e => e.stopPropagation()}>
+                          {!addingTag ? (
+                            <div className="flex flex-wrap gap-1">
+                              {cardAvailableTags.map(tag => (
+                                <button
+                                  key={tag.id}
+                                  onClick={() => { handleAddTag(tag, passage); setTaggingPassageId(null); }}
+                                  className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                                >
+                                  {tag.name}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => setAddingTag(true)}
+                                className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-400 hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center gap-1"
+                              >
+                                <Plus size={9} /> New
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1.5">
+                              <input
+                                autoFocus
+                                value={newTagName}
+                                onChange={e => setNewTagName(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') { handleCreateTag(passage); setTaggingPassageId(null); } if (e.key === 'Escape') setAddingTag(false); }}
+                                placeholder="Tag name"
+                                className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                              />
+                              <button onClick={() => { handleCreateTag(passage); setTaggingPassageId(null); }} className="px-2 py-1 bg-blue-600 text-white text-xs rounded-lg">Add</button>
+                              <button onClick={() => setAddingTag(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={12} /></button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
+                      className="p-1 text-gray-300 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
-                  <button
-                    onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
-                    className="p-1 text-gray-300 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
-                  >
-                    <Trash2 size={13} />
-                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -195,13 +250,24 @@ export function ContextPanel({
                   <p className="text-xs text-gray-400 text-center py-4 animate-pulse">Searching…</p>
                 )}
                 {!similarLoading && similar.length === 0 && (
-                  <p className="text-xs text-gray-400 text-center py-8">No similar passages found in this project.</p>
+                  <p className="text-xs text-gray-400 text-center py-8">No similar content found in this project.</p>
                 )}
                 {similar.map(s => (
-                  <div key={s.passage_id} className="p-3 border border-gray-200 rounded-xl hover:border-blue-200 transition-colors">
+                  <div
+                    key={`${s.source}-${s.passage_id}`}
+                    className="p-3 border border-gray-200 rounded-xl hover:border-purple-300 hover:bg-purple-50 transition-colors cursor-pointer"
+                    onClick={() => onSimilarClick?.(s, similar.filter(x => x.paper_id === s.paper_id))}
+                  >
                     <div className="flex items-center justify-between mb-1">
                       <p className="text-xs font-medium text-gray-600 truncate">{s.paper_title}</p>
-                      <span className="text-xs text-gray-400 flex-shrink-0 ml-2">{Math.round(s.similarity * 100)}%</span>
+                      <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                        {s.source === 'passage' ? (
+                          <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs">highlight</span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">chunk</span>
+                        )}
+                        <span className="text-xs text-gray-400">{Math.round(s.similarity * 100)}%</span>
+                      </div>
                     </div>
                     <p className="text-xs text-gray-700 line-clamp-3">{s.text}</p>
                     <p className="text-xs text-gray-400 mt-1">Page {s.page + 1}</p>
@@ -279,7 +345,7 @@ export function ContextPanel({
                     {selectedPassage.tags.map(tag => (
                       <span key={tag.id} className="flex items-center gap-1 px-2 py-0.5 bg-white border border-gray-200 rounded-full text-xs text-gray-600">
                         {tag.name}
-                        <button onClick={() => handleRemoveTag(tag.id)}>
+                        <button onClick={() => handleRemoveTag(tag.id, selectedPassage)}>
                           <X size={10} className="text-gray-400 hover:text-red-400" />
                         </button>
                       </span>
@@ -290,7 +356,7 @@ export function ContextPanel({
                       {availableTags.slice(0, 6).map(tag => (
                         <button
                           key={tag.id}
-                          onClick={() => handleAddTag(tag)}
+                          onClick={() => handleAddTag(tag, selectedPassage)}
                           className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-400 hover:border-blue-400 hover:text-blue-600 transition-colors"
                         >
                           + {tag.name}

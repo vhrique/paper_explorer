@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
-import { api, type Passage, type Rect } from '../api';
-import { X, Minus, Plus } from 'lucide-react';
+import { api, type Passage, type Rect, type Tag } from '../api';
+import { X, Minus, Plus, Tag as TagIcon, Trash2 } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.js',
@@ -20,31 +20,116 @@ interface PendingSelection {
   toolbarX: number;
 }
 
+interface ConnectedPassage {
+  page: number;
+  rects: Rect[];
+  highlight?: boolean; // render a visual highlight (for the second panel)
+}
+
 interface Props {
   paperId: number;
+  projectId: number;
   passages: Passage[];
   selectedPassage: Passage | null;
   onPassageCreated: (passage: Passage) => void;
   onPassageClick: (passage: Passage) => void;
+  onPassageDeleted: (id: number) => void;
+  onPassageUpdated: (passage: Passage) => void;
   jumpToPage?: number;
+  jumpToPassage?: { page: number; rect: Rect };
+  connectedPassages?: ConnectedPassage[];
+  onConnectedRectsChange?: (rects: DOMRect[]) => void;
+  onOffscreenRectsChange?: (rects: DOMRect[]) => void;
 }
 
-export function PDFPanel({ paperId, passages, selectedPassage, onPassageCreated, onPassageClick, jumpToPage }: Props) {
+export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
   const [selectedColor, setSelectedColor] = useState(HIGHLIGHT_COLORS[0]);
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [hoveredPassageId, setHoveredPassageId] = useState<number | null>(null);
+  const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
+  const [newTagName, setNewTagName] = useState('');
+  const [addingTag, setAddingTag] = useState(false);
+  const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!onConnectedRectsChange && !onOffscreenRectsChange) return;
+    const compute = () => {
+      if (!connectedPassages?.length) {
+        onConnectedRectsChange?.([]);
+        onOffscreenRectsChange?.([]);
+        return;
+      }
+      const cb = containerRef.current?.getBoundingClientRect();
+      if (!cb) { onConnectedRectsChange?.([]); onOffscreenRectsChange?.([]); return; }
+      const visible: DOMRect[] = [];
+      const offscreen: DOMRect[] = [];
+      const cx = cb.left + 24; // left edge of panel for offscreen anchors
+      for (const cp of connectedPassages) {
+        const pageEl = pageRefs.current[cp.page];
+        if (!pageEl) continue;
+        const pb = pageEl.getBoundingClientRect();
+        const r = cp.rects[0];
+        const isNormalized = r && r.x <= 2 && r.y <= 2;
+        const midY = isNormalized
+          ? pb.top + (r.y + r.height / 2) * pb.height
+          : pb.top + pb.height * 0.1;
+        if (midY < cb.top - 20) {
+          offscreen.push(new DOMRect(cx, cb.top, 0, 0));
+        } else if (midY > cb.bottom + 20) {
+          offscreen.push(new DOMRect(cx, cb.bottom, 0, 0));
+        } else {
+          const rawLeft = isNormalized ? pb.left + r.x * pb.width : pb.left + pb.width * 0.1;
+          const rawRight = isNormalized ? rawLeft + r.width * pb.width : pb.left + pb.width * 0.9;
+          const clampedLeft = Math.max(rawLeft, cb.left);
+          const clampedRight = Math.min(rawRight, cb.right);
+          if (clampedRight > clampedLeft) {
+            visible.push(new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0));
+          }
+        }
+      }
+      onConnectedRectsChange?.(visible);
+      onOffscreenRectsChange?.(offscreen);
+    };
+    const raf = requestAnimationFrame(() => requestAnimationFrame(compute));
+    const el = containerRef.current;
+    el?.addEventListener('scroll', compute);
+    window.addEventListener('resize', compute);
+    return () => {
+      cancelAnimationFrame(raf);
+      el?.removeEventListener('scroll', compute);
+      window.removeEventListener('resize', compute);
+    };
+  }, [connectedPassages, scale, numPages, onConnectedRectsChange, onOffscreenRectsChange]);
+
+  useEffect(() => {
+    api.listTags(projectId).then(setTags);
+  }, [projectId]);
 
   const pdfUrl = api.getPaperPdfUrl(paperId);
 
-  // Jump to page when requested
   useEffect(() => {
     if (jumpToPage == null) return;
     const el = pageRefs.current[jumpToPage];
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [jumpToPage]);
+    if (el) el.scrollIntoView({ behavior: 'instant', block: 'start' });
+  }, [jumpToPage, numPages]);
+
+  useEffect(() => {
+    if (!jumpToPassage) return;
+    const pageEl = pageRefs.current[jumpToPassage.page];
+    const container = containerRef.current;
+    if (!pageEl || !container) return;
+    const containerRect = container.getBoundingClientRect();
+    const pageRect = pageEl.getBoundingClientRect();
+    const r = jumpToPassage.rect;
+    const passageMidY = pageRect.top + (r.y + r.height / 2) * pageRect.height;
+    const targetScrollTop = container.scrollTop + passageMidY - containerRect.top - containerRect.height / 2;
+    container.scrollTo({ top: targetScrollTop, behavior: 'instant' });
+  }, [jumpToPassage, numPages]);
 
   const handleMouseUp = useCallback((e: React.MouseEvent) => {
     // Don't capture if clicking on the toolbar itself
@@ -121,6 +206,57 @@ export function PDFPanel({ paperId, passages, selectedPassage, onPassageCreated,
     window.getSelection()?.removeAllRanges();
   };
 
+  const handlePageMouseMove = (e: React.MouseEvent<HTMLDivElement>, pageIndex: number) => {
+    if (taggingPassageId !== null) return;
+    if ((e.target as HTMLElement).closest('[data-passage-toolbar]')) {
+      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+      return;
+    }
+    const el = pageRefs.current[pageIndex];
+    if (!el) return;
+    const bounds = el.getBoundingClientRect();
+    const mx = (e.clientX - bounds.left) / bounds.width;
+    const my = (e.clientY - bounds.top) / bounds.height;
+    const hit = (passagesByPage[pageIndex] ?? []).find(p =>
+      p.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)
+    );
+    if (hit) {
+      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+      setHoveredPassageId(hit.id);
+    } else {
+      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+      hoverTimeout.current = setTimeout(() => setHoveredPassageId(null), 300);
+    }
+  };
+
+  const handleDeletePassage = async (id: number) => {
+    await api.deletePassage(id);
+    onPassageDeleted(id);
+    setTaggingPassageId(null);
+  };
+
+  const handleAddTag = async (tag: Tag, passage: Passage) => {
+    await api.addPassageTag(passage.id, tag.id);
+    onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
+    setTaggingPassageId(null);
+  };
+
+  const handleRemoveTag = async (tagId: number, passage: Passage) => {
+    await api.removePassageTag(passage.id, tagId);
+    onPassageUpdated({ ...passage, tags: passage.tags.filter(t => t.id !== tagId) });
+    const stillUsed = passages.some(p => p.id !== passage.id && p.tags.some(t => t.id === tagId));
+    if (!stillUsed) setTags(prev => prev.filter(t => t.id !== tagId));
+  };
+
+  const handleCreateTag = async (passage: Passage) => {
+    if (!newTagName.trim()) return;
+    const tag = await api.createTag(newTagName.trim(), 'content', projectId);
+    setTags(prev => [...prev, tag]);
+    setNewTagName('');
+    setAddingTag(false);
+    await handleAddTag(tag, passage);
+  };
+
   const passagesByPage = passages.reduce<Record<number, Passage[]>>((acc, p) => {
     (acc[p.page] ??= []).push(p);
     return acc;
@@ -158,6 +294,19 @@ export function PDFPanel({ paperId, passages, selectedPassage, onPassageCreated,
               key={i}
               ref={el => { pageRefs.current[i] = el; }}
               className="relative shadow-lg"
+              onMouseMove={e => handlePageMouseMove(e, i)}
+              onMouseLeave={() => { if (taggingPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => setHoveredPassageId(null), 300); } }}
+              onClick={e => {
+                const el = pageRefs.current[i];
+                if (!el) return;
+                const bounds = el.getBoundingClientRect();
+                const mx = (e.clientX - bounds.left) / bounds.width;
+                const my = (e.clientY - bounds.top) / bounds.height;
+                const hit = (passagesByPage[i] ?? []).find(p =>
+                  p.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)
+                );
+                if (hit) onPassageClick(hit);
+              }}
             >
               <Page
                 pageIndex={i}
@@ -168,26 +317,137 @@ export function PDFPanel({ paperId, passages, selectedPassage, onPassageCreated,
 
               {/* Highlight overlay */}
               <div className="absolute inset-0 pointer-events-none">
-                {(passagesByPage[i] ?? []).map(passage => (
-                  <div key={passage.id}>
-                    {passage.rects.map((rect, ri) => (
-                      <div
-                        key={ri}
-                        className="absolute cursor-pointer pointer-events-auto"
-                        style={{
-                          left: `${rect.x * 100}%`,
-                          top: `${rect.y * 100}%`,
-                          width: `${rect.width * 100}%`,
-                          height: `${rect.height * 100}%`,
-                          backgroundColor: passage.color,
-                          opacity: selectedPassage?.id === passage.id ? 0.6 : 0.35,
-                          outline: selectedPassage?.id === passage.id ? `2px solid ${passage.color}` : 'none',
-                        }}
-                        onClick={() => onPassageClick(passage)}
-                      />
-                    ))}
-                  </div>
-                ))}
+                {(passagesByPage[i] ?? []).map(passage => {
+                  const isTagging = taggingPassageId === passage.id;
+                  const firstRect = passage.rects[0];
+                  const passageTagIds = new Set(passage.tags.map(t => t.id));
+                  const availableTags = tags.filter(t => !passageTagIds.has(t.id) && t.type === 'content');
+                  const isHovered = hoveredPassageId === passage.id;
+                  return (
+                    <div key={passage.id} style={{ position: 'static' }}>
+                      {passage.rects.map((rect, ri) => (
+                        <div
+                          key={ri}
+                          className="absolute pointer-events-none"
+                          style={{
+                            left: `${rect.x * 100}%`,
+                            top: `${rect.y * 100}%`,
+                            width: `${rect.width * 100}%`,
+                            height: `${rect.height * 100}%`,
+                            backgroundColor: passage.color,
+                            opacity: selectedPassage?.id === passage.id ? 0.6 : 0.35,
+                            outline: selectedPassage?.id === passage.id ? `2px solid ${passage.color}` : 'none',
+                          }}
+                        />
+                      ))}
+
+                      {/* Hover toolbar */}
+                      {(isHovered || isTagging) && firstRect && (
+                        <div
+                          data-passage-toolbar
+                          className="absolute z-50 pointer-events-auto flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1.5 py-1"
+                          style={{
+                            left: `${firstRect.x * 100}%`,
+                            top: `calc(${firstRect.y * 100}% - 34px)`,
+                          }}
+                        >
+                          <button
+                            onClick={e => { e.stopPropagation(); setTaggingPassageId(isTagging ? null : passage.id); setNewTagName(''); setAddingTag(false); }}
+                            className="p-1 text-gray-500 hover:text-blue-600 rounded hover:bg-blue-50 transition-colors"
+                            title="Add tag"
+                          >
+                            <TagIcon size={13} />
+                          </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
+                            className="p-1 text-gray-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
+                            title="Delete highlight"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Tag picker */}
+                      {isTagging && firstRect && (
+                        <div
+                          data-passage-toolbar
+                          className="absolute z-50 pointer-events-auto bg-white rounded-xl shadow-xl border border-gray-200 p-2 w-48"
+                          style={{
+                            left: `${firstRect.x * 100}%`,
+                            top: `calc(${firstRect.y * 100}% - 38px)`,
+                            transform: 'translateY(-100%)',
+                          }}
+                        >
+                          {passage.tags.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mb-2">
+                              {passage.tags.map(tag => (
+                                <span key={tag.id} className="flex items-center gap-0.5 px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
+                                  {tag.name}
+                                  <button onClick={() => handleRemoveTag(tag.id, passage)}>
+                                    <X size={9} className="text-gray-400 hover:text-red-400" />
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {!addingTag ? (
+                            <div className="flex flex-wrap gap-1">
+                              {availableTags.map(tag => (
+                                <button
+                                  key={tag.id}
+                                  onClick={() => handleAddTag(tag, passage)}
+                                  className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                                >
+                                  {tag.name}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => setAddingTag(true)}
+                                className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-400 hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center gap-1"
+                              >
+                                <Plus size={9} /> New
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex gap-1.5">
+                              <input
+                                autoFocus
+                                value={newTagName}
+                                onChange={e => setNewTagName(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') handleCreateTag(passage); if (e.key === 'Escape') setAddingTag(false); }}
+                                placeholder="Tag name"
+                                className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                              />
+                              <button onClick={() => handleCreateTag(passage)} className="px-2 py-1 bg-blue-600 text-white text-xs rounded-lg">Add</button>
+                              <button onClick={() => setAddingTag(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={12} /></button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Connected passage highlights */}
+                {connectedPassages?.filter(cp => cp.highlight && cp.page === i).flatMap((cp, ci) =>
+                  cp.rects.map((rect, ri) => (
+                    <div
+                      key={`conn-${ci}-${ri}`}
+                      className="absolute pointer-events-none animate-pulse"
+                      style={{
+                        left: `${rect.x * 100}%`,
+                        top: `${rect.y * 100}%`,
+                        width: `${rect.width * 100}%`,
+                        height: `${rect.height * 100}%`,
+                        backgroundColor: '#7c3aed',
+                        opacity: 0.4,
+                        outline: '2.5px solid #7c3aed',
+                        borderRadius: '2px',
+                      }}
+                    />
+                  ))
+                )}
               </div>
             </div>
           ))}
