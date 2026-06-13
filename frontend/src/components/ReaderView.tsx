@@ -378,7 +378,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
             onPassageDeleted={handlePassageDeleted}
             onPassageUpdated={handlePassageUpdated}
             jumpToPage={jumpToPage}
-            connectedPassages={sourceConnectedPassages}
+            connectedPassages={showSimilarityLines ? sourceConnectedPassages : []}
             onConnectedRectsChange={handleSourceRectsChange}
             onLinkStart={secondPanelOpen ? (p, r) => handleLinkStart(p, r, 'first') : undefined}
             linkingTarget={linkingPassage?.panel === 'second'}
@@ -411,7 +411,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
                 onPassageDeleted={id => setSecondPassages(prev => prev.filter(p => p.id !== id))}
                 onPassageUpdated={p => setSecondPassages(prev => prev.map(x => x.id === p.id ? p : x))}
                 jumpToPassage={secondJumpToPassage}
-                connectedPassages={targetConnectedPassages}
+                connectedPassages={showSimilarityLines ? targetConnectedPassages : []}
                 onConnectedRectsChange={setTargetRects}
                 onOffscreenRectsChange={setOffscreenTargetRects}
                 onLinkStart={(p, r) => handleLinkStart(p, r, 'second')}
