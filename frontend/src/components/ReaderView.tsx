@@ -105,8 +105,8 @@ export function ReaderView({ paper, project, onBack }: Props) {
   [selectedPassage, connectedSimilar, connectedSimilarList]);
 
   const targetConnectedPassages = useMemo(() =>
-    connectedSimilarList.map(s => ({ page: s.page, rects: s.rects, highlight: true })),
-  [connectedSimilarList]);
+    sourceRect ? connectedSimilarList.map(s => ({ page: s.page, rects: s.rects, highlight: true })) : [],
+  [connectedSimilarList, sourceRect]);
 
   // Stable callback — new DOMRect objects from compute() would otherwise re-trigger the effect
   const handleSourceRectsChange = useCallback((rects: DOMRect[]) => {
