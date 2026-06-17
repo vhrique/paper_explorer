@@ -1,26 +1,41 @@
 """
 PDF processing: extract text chunks with bounding boxes per page.
-Each chunk corresponds to a text block as identified by PyMuPDF.
+Chunks are extracted at three granularity levels: block, paragraph, sentence.
 """
 
+import re
 import fitz  # PyMuPDF
 from typing import List, Dict, Any
 
 
 MIN_CHUNK_CHARS = 40  # skip very short blocks (headers, page numbers, etc.)
+MIN_PARA_CHARS = 30
+MIN_SENT_CHARS = 20
+
+
+def split_into_paragraphs(text: str) -> List[str]:
+    """Split block text into paragraphs by blank lines."""
+    parts = re.split(r'\n[ \t]*\n', text)
+    return [p.strip() for p in parts if len(p.strip()) >= MIN_PARA_CHARS]
+
+
+def split_into_sentences(text: str) -> List[str]:
+    """Split paragraph text into sentences on punctuation boundaries."""
+    text = re.sub(r'\s+', ' ', text)
+    parts = re.split(r'(?<=[.!?])\s+(?=[A-Z\d("])', text)
+    return [s.strip() for s in parts if len(s.strip()) >= MIN_SENT_CHARS]
 
 
 def extract_chunks(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     """
-    Extract text chunks from a PDF.
+    Extract block-level text chunks (legacy, kept for compatibility).
     Returns list of {page, text, rects} dicts.
-    rects format: [{x, y, width, height}] in PDF coordinate space.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     chunks = []
 
     for page_num, page in enumerate(doc):
-        blocks = page.get_text("blocks", sort=True)  # (x0, y0, x1, y1, text, block_no, block_type)
+        blocks = page.get_text("blocks", sort=True)
         pw = page.rect.width or 1
         ph = page.rect.height or 1
         for block in blocks:
@@ -41,6 +56,48 @@ def extract_chunks(pdf_bytes: bytes) -> List[Dict[str, Any]]:
 
     doc.close()
     return chunks
+
+
+def extract_chunks_hierarchical(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract text chunks at block, paragraph, and sentence granularity.
+    Returns a list of block dicts, each with a 'paragraphs' list,
+    each paragraph with a 'sentences' list.
+    Paragraphs and sentences inherit the enclosing block's rects.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    blocks = []
+
+    for page_num, page in enumerate(doc):
+        raw_blocks = page.get_text("blocks", sort=True)
+        pw = page.rect.width or 1
+        ph = page.rect.height or 1
+        for raw in raw_blocks:
+            x0, y0, x1, y1, text, *_ = raw
+            text = text.strip()
+            if len(text) < MIN_CHUNK_CHARS:
+                continue
+            rects = [{"x": x0 / pw, "y": y0 / ph, "width": (x1 - x0) / pw, "height": (y1 - y0) / ph}]
+
+            paras = split_into_paragraphs(text) or [text]
+            para_list = []
+            for para_text in paras:
+                sentences = split_into_sentences(para_text)
+                para_list.append({
+                    "text": para_text,
+                    "rects": rects,
+                    "sentences": [{"text": s, "rects": rects} for s in sentences],
+                })
+
+            blocks.append({
+                "page": page_num,
+                "text": text,
+                "rects": rects,
+                "paragraphs": para_list,
+            })
+
+    doc.close()
+    return blocks
 
 
 _BAD_TITLE_WORDS = {"microsoft", "word", "latex", "adobe", "untitled", "document"}

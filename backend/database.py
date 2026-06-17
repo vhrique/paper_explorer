@@ -126,6 +126,8 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS granularity TEXT DEFAULT 'block'")
+            cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES chunks(id) ON DELETE CASCADE")
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS passage_links (

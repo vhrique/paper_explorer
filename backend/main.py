@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +26,7 @@ from models import (
 from services.embedding import get_embedding_service
 from services.llm_service import get_llm_service
 from services.metadata_service import fetch_paper_metadata
-from services.pdf_processor import extract_arxiv_id, extract_chunks, extract_doi, extract_title_from_pdf
+from services.pdf_processor import extract_arxiv_id, extract_chunks_hierarchical, extract_doi, extract_title_from_pdf
 from services.similarity import find_similar
 from services.similarity_model import train_similarity_model, load_similarity_model
 from services.storage import get_storage
@@ -204,6 +205,51 @@ def get_paper_pdf(paper_id: int):
         raise HTTPException(status_code=404, detail="PDF not found in storage")
 
 
+@app.post("/papers/{paper_id}/reprocess-chunks")
+def reprocess_paper_chunks(paper_id: int):
+    """Delete existing chunks and re-extract at block/paragraph/sentence granularity."""
+    row = fetchone("SELECT filename FROM papers WHERE id = %s", (paper_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    try:
+        pdf_bytes = storage.download(f"pdfs/{paper_id}/{row['filename']}")
+    except Exception:
+        raise HTTPException(status_code=404, detail="PDF not found in storage")
+
+    execute("DELETE FROM chunks WHERE paper_id = %s", (paper_id,))
+
+    try:
+        blocks = extract_chunks_hierarchical(pdf_bytes)
+        if not blocks:
+            return {"paper_id": paper_id, "chunks_inserted": 0}
+        emb_service = get_embedding_service()
+        ordered = []
+        for block in blocks:
+            block_idx = len(ordered)
+            ordered.append({"page": block["page"], "text": block["text"], "rects": block["rects"], "granularity": "block", "parent_idx": None})
+            for para in block["paragraphs"]:
+                para_idx = len(ordered)
+                ordered.append({"page": block["page"], "text": para["text"], "rects": para["rects"], "granularity": "paragraph", "parent_idx": block_idx})
+                for sent in para["sentences"]:
+                    ordered.append({"page": block["page"], "text": sent["text"], "rects": sent["rects"], "granularity": "sentence", "parent_idx": para_idx})
+        embeddings = emb_service.embed_batch([item["text"] for item in ordered])
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        db_ids = []
+        for item, emb in zip(ordered, embeddings):
+            parent_db_id = db_ids[item["parent_idx"]] if item["parent_idx"] is not None else None
+            cur.execute(
+                "INSERT INTO chunks (paper_id, page, text, rects, embedding, granularity, parent_id) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (paper_id, item["page"], item["text"], json.dumps(item["rects"]), embedding_to_json(emb), item["granularity"], parent_db_id)
+            )
+            db_ids.append(cur.fetchone()["id"])
+        conn.commit()
+        conn.close()
+        return {"paper_id": paper_id, "chunks_inserted": len(ordered)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reprocessing failed: {e}")
+
+
 def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
     title = extract_title_from_pdf(pdf_bytes) or Path(filename).stem
     doi = extract_doi(pdf_bytes)
@@ -219,19 +265,30 @@ def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
     storage.delete(f"pdfs/temp/{filename}")
 
     try:
-        chunks = extract_chunks(pdf_bytes)
-        if chunks:
+        blocks = extract_chunks_hierarchical(pdf_bytes)
+        if blocks:
             emb_service = get_embedding_service()
-            embeddings = emb_service.embed_batch([c["text"] for c in chunks])
-            from database import get_db_connection
+            # Build a flat ordered list: block → paragraphs → sentences (depth-first)
+            ordered = []
+            for block in blocks:
+                block_idx = len(ordered)
+                ordered.append({"page": block["page"], "text": block["text"], "rects": block["rects"], "granularity": "block", "parent_idx": None})
+                for para in block["paragraphs"]:
+                    para_idx = len(ordered)
+                    ordered.append({"page": block["page"], "text": para["text"], "rects": para["rects"], "granularity": "paragraph", "parent_idx": block_idx})
+                    for sent in para["sentences"]:
+                        ordered.append({"page": block["page"], "text": sent["text"], "rects": sent["rects"], "granularity": "sentence", "parent_idx": para_idx})
+            embeddings = emb_service.embed_batch([item["text"] for item in ordered])
             conn = get_db_connection()
-            cur = conn.cursor()
-            for chunk, emb in zip(chunks, embeddings):
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            db_ids = []
+            for item, emb in zip(ordered, embeddings):
+                parent_db_id = db_ids[item["parent_idx"]] if item["parent_idx"] is not None else None
                 cur.execute(
-                    "INSERT INTO chunks (paper_id, page, text, rects, embedding) VALUES (%s, %s, %s, %s, %s)",
-                    (paper_id, chunk["page"], chunk["text"],
-                     json.dumps(chunk["rects"]), embedding_to_json(emb))
+                    "INSERT INTO chunks (paper_id, page, text, rects, embedding, granularity, parent_id) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (paper_id, item["page"], item["text"], json.dumps(item["rects"]), embedding_to_json(emb), item["granularity"], parent_db_id)
                 )
+                db_ids.append(cur.fetchone()["id"])
             conn.commit()
             conn.close()
     except Exception as e:
@@ -543,15 +600,21 @@ def get_similar_passages(passage_id: int, limit: int = 10, project_id: Optional[
         AND p.embedding IS NOT NULL
     """.format(subquery), params_passage)
 
-    # Chunk candidates (raw chunks from other papers in the same project)
+    # Chunk candidates: search sentence-level (fine-grained) plus block-level for
+    # papers processed before the hierarchical extraction was added. LEFT JOIN fetches
+    # the parent paragraph so sentences can be resolved to paragraph display units.
     chunk_rows = fetchall("""
-        SELECT c.*, pa.title as paper_title, 'chunk' as source
+        SELECT c.*, pa.title as paper_title, 'chunk' as source,
+               cp.id as parent_chunk_id, cp.text as parent_text,
+               cp.rects as parent_rects, cp.page as parent_page
         FROM chunks c
         JOIN papers pa ON pa.id = c.paper_id
         JOIN paper_projects pp ON pp.paper_id = pa.id
+        LEFT JOIN chunks cp ON cp.id = c.parent_id
         WHERE pp.project_id = {}
         AND pa.id != %s
         AND c.embedding IS NOT NULL
+        AND (c.granularity = 'sentence' OR c.granularity = 'paragraph')
     """.format(subquery), params_chunk)
 
     all_rows = passage_rows + chunk_rows
@@ -560,12 +623,29 @@ def get_similar_passages(passage_id: int, limit: int = 10, project_id: Optional[
         for r in all_rows
     ]
 
-    results = find_similar(query_emb, candidates, limit=limit, model=model)
+    results = find_similar(query_emb, candidates, limit=limit * 3, model=model)
 
     row_map = {(r["source"], r["id"]): r for r in all_rows}
+
+    # Suppress a paragraph if any of its sentences also ranked — sentence wins.
+    paragraphs_covered_by_sentence = {
+        row_map[key]["parent_chunk_id"]
+        for key, _ in results
+        if row_map[key].get("granularity") == "sentence" and row_map[key].get("parent_chunk_id")
+    }
+
     similar = []
+    seen_display_ids = set()
     for key, sim in results:
+        if len(similar) >= limit:
+            break
         r = row_map[key]
+        if r.get("granularity") == "paragraph" and r["id"] in paragraphs_covered_by_sentence:
+            continue
+        dedup_key = (r["source"], r["id"])
+        if dedup_key in seen_display_ids:
+            continue
+        seen_display_ids.add(dedup_key)
         tags = _passage_with_tags(r)["tags"] if r["source"] == "passage" else []
         similar.append({
             "passage_id": r["id"],
@@ -773,7 +853,7 @@ def search_paper(paper_id: int, query: SearchQuery):
         model = load_similarity_model(proj_row["project_id"])
 
     chunks_raw = fetchall(
-        "SELECT * FROM chunks WHERE paper_id = %s AND embedding IS NOT NULL",
+        "SELECT * FROM chunks WHERE paper_id = %s AND embedding IS NOT NULL AND (granularity = 'paragraph' OR granularity = 'block' OR granularity IS NULL)",
         (paper_id,)
     )
     candidates = [

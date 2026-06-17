@@ -78,7 +78,7 @@ PostgreSQL database initialized on startup (`database.py:init_db`).
 - **passage_tags** — many-to-many junction table between passages and tags
 - **notes** — comments annotated on passages (or tags) with serialized embeddings
 - **note_passages** / **note_tags** — connection tables mapping notes to passages and tags
-- **chunks** — full-text blocks automatically parsed from PDFs on upload, used for Q&A vector search
+- **chunks** — full-text segments parsed from PDFs on upload, stored at three granularity levels: `block` (PyMuPDF text block), `paragraph` (blank-line split of a block), and `sentence` (punctuation-boundary split of a paragraph). Each row carries a `granularity TEXT` field and a `parent_id INTEGER` self-reference (sentence → paragraph → block). All three levels share the enclosing block's normalized bounding rect. Used for similarity search and Q&A.
 - **passage_links** — manual bidirectional links established between passages
 - **svm_models** — metadata for SVM-based classifiers (legacy)
 
@@ -87,7 +87,7 @@ PostgreSQL database initialized on startup (`database.py:init_db`).
 ## Core Backend Logic
 
 ### PDF Processing (`pdf_processor.py`)
-Utilizes `PyMuPDF` (`fitz`) to extract text blocks and compute normalized bounding box coordinates (`x`, `y`, `width`, `height`) for each chunk. It also attempts to extract DOIs from the first two pages.
+Utilizes `PyMuPDF` (`fitz`) to extract text and compute normalized bounding box coordinates (`x`, `y`, `width`, `height`). On upload, `extract_chunks_hierarchical` produces three granularity levels per PDF block: the block itself, its paragraphs (split on blank lines), and their sentences (split on punctuation boundaries). All sub-units inherit the enclosing block's bounding rect — word-level rect computation per sentence is a planned improvement. Also extracts DOIs and arXiv IDs from the first pages.
 
 ### Embeddings (`embedding.py`)
 Sends text to an OpenAI-compatible embedding endpoint (e.g., LM Studio, Ollama, OpenAI) to generate vector embeddings. Used for highlights, note content, and parsed PDF chunks.
@@ -97,9 +97,11 @@ Applies Cosine Similarity over candidate text/passage embeddings in Python using
 $$\text{similarity} = \frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\| \|\mathbf{v}\|}$$
 Used to display related highlights/chunks in the "Similar" tab.
 
+Candidates are `sentence` and `paragraph` chunks from other papers in the project (plus user passage highlights). Resolution rule: if both a sentence and its parent paragraph rank in results, the **sentence wins** and the paragraph is suppressed. If only the paragraph ranks, the paragraph is shown. Results are deduplicated by resolved display ID.
+
 ### Q&A vector search (`main.py:search_paper`)
 1. Embeds the user's question.
-2. Finds the top-k most similar text chunks within the paper via Python-based cosine similarity.
+2. Finds the top-k most similar `paragraph` (or legacy `block`) chunks within the paper via cosine similarity. Sentences are excluded here so the LLM receives sufficient context per passage.
 3. Formulates a prompt appending the context from the matching chunks.
 4. Feeds the prompt to the LLM service to synthesize a concise, source-based answer.
 
@@ -143,3 +145,10 @@ The React UI is split into two primary modes controlled by `App.tsx`:
 
 ### Changing the Embedding or LLM Provider
 Set the environment variables `EMBEDDING_BASE_URL` / `LLM_BASE_URL` and `EMBEDDING_MODEL` / `LLM_MODEL` to match your local Ollama instance, LM Studio endpoint, or OpenAI API credentials in `docker-compose.yml` or your `.env` configuration file.
+
+### Reprocessing chunks for an existing paper
+If a paper was uploaded before the hierarchical chunk extraction was introduced, call:
+```
+POST /papers/{paper_id}/reprocess-chunks
+```
+This deletes all existing chunks for that paper and re-runs `extract_chunks_hierarchical` on the stored PDF, inserting block, paragraph, and sentence chunks with correct `parent_id` references. Returns `{"paper_id": ..., "chunks_inserted": N}`.
