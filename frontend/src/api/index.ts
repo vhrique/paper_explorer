@@ -14,6 +14,7 @@ export interface Paper {
   title: string;
   filename: string;
   doi?: string;
+  arxiv_id?: string;
   abstract?: string;
   created_at: string;
   url?: string;
@@ -102,6 +103,16 @@ export interface SearchResponse {
   chunks: ChunkResult[];
 }
 
+export interface PaperMetadataResult {
+  title?: string;
+  doi?: string;
+  abstract?: string;
+  authors?: string[];
+  year?: number;
+  venue?: string;
+  source: string;
+}
+
 export const api = {
   // Projects
   listProjects: () => axios.get<Project[]>(`${BASE}/projects`).then(r => r.data),
@@ -117,14 +128,17 @@ export const api = {
   listPapers: (projectId: number) =>
     axios.get<Paper[]>(`${BASE}/projects/${projectId}/papers`).then(r => r.data),
   getPaper: (id: number) => axios.get<Paper>(`${BASE}/papers/${id}`).then(r => r.data),
-  uploadPaper: (file: File) => {
+  uploadPaper: (file: File, projectId?: number) => {
     const form = new FormData();
     form.append('file', file);
-    return axios.post<Paper>(`${BASE}/papers`, form).then(r => r.data);
+    const url = projectId ? `${BASE}/projects/${projectId}/papers` : `${BASE}/papers`;
+    return axios.post<Paper>(url, form).then(r => r.data);
   },
   updatePaper: (id: number, data: Partial<Paper>) =>
     axios.patch<Paper>(`${BASE}/papers/${id}`, data).then(r => r.data),
   deletePaper: (id: number) => axios.delete(`${BASE}/papers/${id}`),
+  fetchPaperMetadata: (id: number, doi?: string, arxiv_id?: string, title?: string) =>
+    axios.post<PaperMetadataResult>(`${BASE}/papers/${id}/fetch-metadata`, { doi, arxiv_id, title }).then(r => r.data),
   addPaperToProject: (paperId: number, projectId: number) =>
     axios.post(`${BASE}/papers/${paperId}/projects/${projectId}`),
   removePaperFromProject: (paperId: number, projectId: number) =>
