@@ -1,33 +1,36 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import shutil
-import os
-import uuid
-import random
 import io
-import psycopg2.extras
-from typing import List
+import json
+import os
+from pathlib import Path
+from typing import List, Optional
 
-from database import (init_db, get_db_connection, insert_nodes, get_nodes_by_project, 
-                     get_nodes_by_ids, get_nodes_by_paper, get_context_nodes, update_node_metadata, 
-                     update_nodes_by_ids, delete_nodes_by_paper, delete_nodes_by_project, similarity_search)
-from models import (ProjectCreate, Project, ProjectUpdate, Paper, GraphData, PaperUpdate, TagCreate, Tag, 
-                    NodeTag, TagSummary, ComputeEmbeddingsResponse, TagUpdate, Note, 
-                    NoteCreate, NoteUpdate, Link, LinkCreate, TrainModelRequest, TrainModelResponse)
-from services.pdf_processor import PDFProcessor
-from services.embedding import EmbeddingService
-from services.graph import GraphService
-from services.storage import S3StorageService
-from services.similarity import SimilarityService
-from services.tag_service import TagService
-from services.semantic_scholar import SemanticScholarService
-from services.discovery import DiscoveryService
-from services.crossref_service import CrossRefService
+import psycopg2
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+load_dotenv()  # loads .env if present; env vars already set take precedence
+
+from database import (
+    execute, execute_returning, fetchall, fetchone,
+    embedding_to_json, json_to_embedding, init_db, get_db_connection
+)
+from models import (
+    ChunkResult, FetchMetadataRequest, Note, NoteCreate, NoteUpdate,
+    Paper, PaperMetadataResult, PaperUpdate, Passage, PassageCreate, PassageLink, PassageLinkDetail, PassageUpdate,
+    Project, ProjectCreate, ProjectUpdate,
+    SearchQuery, SearchResponse, SimilarPassage, Tag, TagCreate, TagUpdate,
+)
+from services.embedding import get_embedding_service
 from services.llm_service import get_llm_service
+from services.metadata_service import fetch_paper_metadata
+from services.pdf_processor import extract_arxiv_id, extract_chunks, extract_doi, extract_title_from_pdf
+from services.similarity import find_similar
+from services.similarity_model import train_similarity_model, load_similarity_model
+from services.storage import get_storage
 
-
-app = FastAPI(title="Paper Explorer API")
+app = FastAPI(title="Paper Explorer API v2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,1551 +40,850 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Services
-storage_service = S3StorageService()
-pdf_processor = PDFProcessor(storage_service)
-embedding_service = EmbeddingService()
-graph_service = GraphService()
-llm_service = get_llm_service()
-similarity_service = SimilarityService(llm_service=llm_service)
-tag_service = TagService(storage_service)
-semantic_scholar_service = SemanticScholarService()
-discovery_service = DiscoveryService(semantic_scholar_service, embedding_service, graph_service)
-crossref_service = CrossRefService()
+storage = get_storage()
+
 
 @app.on_event("startup")
-def startup_event():
+def startup():
     init_db()
 
-@app.get("/projects/{project_id}/discovery/context")
-def get_discovery_context_endpoint(project_id: int):
-    return discovery_service.get_discovery_context(project_id)
 
-@app.post("/projects/", response_model=Project)
+# ---------------------------------------------------------------------------
+# Files (local storage proxy)
+# ---------------------------------------------------------------------------
+
+@app.get("/files/{file_path:path}")
+def serve_file(file_path: str):
+    try:
+        data = storage.stream(file_path)
+        media_type = "application/pdf" if file_path.endswith(".pdf") else "application/octet-stream"
+        return StreamingResponse(data, media_type=media_type)
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+# ---------------------------------------------------------------------------
+# Projects
+# ---------------------------------------------------------------------------
+
+@app.get("/projects", response_model=List[Project])
+def list_projects():
+    return fetchall("SELECT * FROM projects ORDER BY created_at DESC")
+
+
+@app.post("/projects", response_model=Project)
 def create_project(project: ProjectCreate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute(
-        "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING id",
+    return execute_returning(
+        "INSERT INTO projects (name, description) VALUES (%s, %s) RETURNING *",
         (project.name, project.description)
     )
-    project_id = cursor.fetchone()['id']
-    conn.commit()
-    
-    # Fetch created project
-    cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    return dict(row)
 
-@app.get("/projects/", response_model=List[Project])
-def list_projects():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM projects ORDER BY created_at DESC")
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+
+@app.post("/projects/{project_id}/train-similarity")
+def train_project_similarity(project_id: int):
+    project = fetchone("SELECT * FROM projects WHERE id = %s", (project_id,))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    passages = fetchall("""
+        SELECT p.*
+        FROM passages p
+        JOIN papers pa ON pa.id = p.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = %s
+    """, (project_id,))
+
+    if not passages:
+        raise HTTPException(status_code=400, detail="No highlights found in this project. Please highlight text to create passages first.")
+
+    has_embeddings = any(p.get("embedding") for p in passages)
+    if not has_embeddings:
+        raise HTTPException(status_code=400, detail="No passages with embeddings found. Please wait for embeddings to generate.")
+
+    links = fetchall("""
+        SELECT DISTINCT pl.id, pl.passage_id_1, pl.passage_id_2
+        FROM passage_links pl
+        JOIN passages p1 ON pl.passage_id_1 = p1.id
+        JOIN papers pa1 ON p1.paper_id = pa1.id
+        JOIN paper_projects pp1 ON pp1.paper_id = pa1.id
+        WHERE pp1.project_id = %s
+    """, (project_id,))
+
+    chunks = fetchall("""
+        SELECT c.*
+        FROM chunks c
+        JOIN papers pa ON pa.id = c.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = %s
+    """, (project_id,))
+
+    success = train_similarity_model(project_id, passages, links, chunks=chunks)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to train similarity model")
+
+    return {"message": "Similarity model trained successfully"}
+
 
 @app.patch("/projects/{project_id}", response_model=Project)
-def update_project(project_id: int, project_update: ProjectUpdate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Check if project exists
-    cursor.execute("SELECT * FROM projects WHERE id = %s", (project_id,))
-    existing_project = cursor.fetchone()
-    
-    if not existing_project:
-        conn.close()
+def update_project(project_id: int, update: ProjectUpdate):
+    existing = fetchone("SELECT * FROM projects WHERE id = %s", (project_id,))
+    if not existing:
         raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Build update query dynamically
-    update_fields = []
-    params = []
-    
-    if project_update.name is not None:
-        update_fields.append("name = %s")
-        params.append(project_update.name)
-        
-    if project_update.description is not None:
-        update_fields.append("description = %s")
-        params.append(project_update.description)
-        
-    if not update_fields:
-        conn.close()
-        return dict(existing_project)
-        
+
+    fields, params = [], []
+    if update.name is not None:
+        fields.append("name = %s"); params.append(update.name)
+    if update.description is not None:
+        fields.append("description = %s"); params.append(update.description)
+    if not fields:
+        return existing
+
     params.append(project_id)
-    query = f"UPDATE projects SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
-    
-    cursor.execute(query, tuple(params))
-    updated_project = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    
-    return dict(updated_project)
+    return execute_returning(
+        f"UPDATE projects SET {', '.join(fields)} WHERE id = %s RETURNING *", tuple(params)
+    )
+
 
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    try:
-        # Get all papers for this project to delete PDFs
-        cursor.execute("SELECT id, filename FROM papers WHERE project_id = %s", (project_id,))
-        papers = cursor.fetchall()
-        
-        # Get all node IDs for this project
-        nodes = get_nodes_by_project(project_id, include_embeddings=False)
-        node_ids = [n['id'] for n in nodes]
-        
-        # Delete image files from storage
-        if nodes:
-            for node in nodes:
-                if node.get("type") == "image":
-                    image_key = node.get("content")
-                    if image_key:
-                        try:
-                            storage_service.delete_file(image_key)
-                            print(f"Deleted image: {image_key}")
-                        except Exception as e:
-                            print(f"Error deleting image {image_key}: {e}")
-        
-        if node_ids:
-            # Delete all node_tags entries for nodes in this project
-            cursor.execute(
-                "DELETE FROM node_tags WHERE node_id = ANY(%s)",
-                (node_ids,)
-            )
+    execute("DELETE FROM projects WHERE id = %s", (project_id,))
+    return {"message": "Project deleted"}
 
-            # Delete all links involving nodes in this project
-            cursor.execute(
-                "DELETE FROM links WHERE source_node_id = ANY(%s) OR target_node_id = ANY(%s)",
-                (node_ids, node_ids)
-            )
-        
-        # Delete the project (cascade will handle papers, nodes, notes, local tags, and svm_models)
-        cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
-        
-        conn.commit()
-        
-        # Delete PDF files from storage after database commit
-        for paper in papers:
-            pdf_key = f"pdfs/{project_id}/{paper['filename']}"
-            try:
-                storage_service.delete_file(pdf_key)
-                print(f"Deleted PDF: {pdf_key}")
-            except Exception as e:
-                print(f"Error deleting PDF {pdf_key}: {e}")
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting project: {e}")
-        raise
-    finally:
-        conn.close()
-    
-    return {"message": "Project deleted successfully"}
 
-@app.get("/projects/{project_id}/papers/", response_model=List[Paper])
+# ---------------------------------------------------------------------------
+# Papers
+# ---------------------------------------------------------------------------
+
+def _paper_with_meta(row: dict) -> dict:
+    paper = dict(row)
+    paper["url"] = f"/api/papers/{paper['id']}/pdf"
+    paper["project_ids"] = [
+        r["project_id"] for r in
+        fetchall("SELECT project_id FROM paper_projects WHERE paper_id = %s", (paper["id"],))
+    ]
+    return paper
+
+
+@app.get("/papers", response_model=List[Paper])
+def list_all_papers():
+    rows = fetchall("SELECT * FROM papers ORDER BY created_at DESC")
+    return [_paper_with_meta(r) for r in rows]
+
+
+@app.get("/projects/{project_id}/papers", response_model=List[Paper])
 def list_papers(project_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM papers WHERE project_id = %s ORDER BY created_at DESC", (project_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    
-    papers = []
-    for row in rows:
-        paper = dict(row)
-        # Generate proxy URL instead of presigned URL
-        paper['url'] = f"/api/papers/{paper['id']}/pdf"
-        papers.append(paper)
-        
-    return papers
+    rows = fetchall("""
+        SELECT p.* FROM papers p
+        JOIN paper_projects pp ON pp.paper_id = p.id
+        WHERE pp.project_id = %s
+        ORDER BY p.created_at DESC
+    """, (project_id,))
+    return [_paper_with_meta(r) for r in rows]
+
 
 @app.get("/papers/{paper_id}", response_model=Paper)
 def get_paper(paper_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM papers WHERE id = %s", (paper_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
+    row = fetchone("SELECT * FROM papers WHERE id = %s", (paper_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Paper not found")
-    
-    paper = dict(row)
-    # Generate proxy URL instead of presigned URL
-    paper['url'] = f"/api/papers/{paper_id}/pdf"
-    
-    return paper
+    return _paper_with_meta(row)
+
 
 @app.get("/papers/{paper_id}/pdf")
 def get_paper_pdf(paper_id: int):
-    """Proxy PDF file from MinIO to avoid CORS issues"""
-    from fastapi.responses import StreamingResponse
-    
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT project_id, filename FROM papers WHERE id = %s", (paper_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
+    row = fetchone("SELECT filename FROM papers WHERE id = %s", (paper_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Paper not found")
-    
-    pdf_key = f"pdfs/{row['project_id']}/{row['filename']}"
-    
     try:
-        # Download from MinIO
-        response = storage_service.s3_client.get_object(Bucket=storage_service.bucket_name, Key=pdf_key)
-        
-        # Stream it to the client
+        stream = storage.stream(f"pdfs/{paper_id}/{row['filename']}")
         return StreamingResponse(
-            response['Body'],
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename={row['filename']}"
-            }
+            stream, media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={row['filename']}"}
         )
+    except Exception:
+        raise HTTPException(status_code=404, detail="PDF not found in storage")
+
+
+def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
+    title = extract_title_from_pdf(pdf_bytes) or Path(filename).stem
+    doi = extract_doi(pdf_bytes)
+    arxiv_id = extract_arxiv_id(pdf_bytes)
+
+    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/temp/{filename}", content_type="application/pdf")
+    paper = execute_returning(
+        "INSERT INTO papers (title, filename, doi, arxiv_id) VALUES (%s, %s, %s, %s) RETURNING *",
+        (title, filename, doi, arxiv_id)
+    )
+    paper_id = paper["id"]
+    storage.upload(io.BytesIO(pdf_bytes), f"pdfs/{paper_id}/{filename}", content_type="application/pdf")
+    storage.delete(f"pdfs/temp/{filename}")
+
+    try:
+        chunks = extract_chunks(pdf_bytes)
+        if chunks:
+            emb_service = get_embedding_service()
+            embeddings = emb_service.embed_batch([c["text"] for c in chunks])
+            from database import get_db_connection
+            conn = get_db_connection()
+            cur = conn.cursor()
+            for chunk, emb in zip(chunks, embeddings):
+                cur.execute(
+                    "INSERT INTO chunks (paper_id, page, text, rects, embedding) VALUES (%s, %s, %s, %s, %s)",
+                    (paper_id, chunk["page"], chunk["text"],
+                     json.dumps(chunk["rects"]), embedding_to_json(emb))
+                )
+            conn.commit()
+            conn.close()
     except Exception as e:
-        print(f"Error fetching PDF: {e}")
-        raise HTTPException(status_code=404, detail="PDF file not found")
-        
-@app.patch("/papers/{paper_id}", response_model=Paper)
-def update_paper(paper_id: int, paper_update: PaperUpdate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Check if paper exists
-    cursor.execute("SELECT * FROM papers WHERE id = %s", (paper_id,))
-    existing_paper = cursor.fetchone()
-    
-    if not existing_paper:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Paper not found")
-    
-    # Build update query dynamically
-    update_fields = []
-    params = []
-    
-    if paper_update.title is not None:
-        update_fields.append("title = %s")
-        params.append(paper_update.title)
-        
-    if paper_update.color is not None:
-        update_fields.append("color = %s")
-        params.append(paper_update.color)
-        
-    if paper_update.description is not None:
-        update_fields.append("description = %s")
-        params.append(paper_update.description)
-        
-    if paper_update.doi is not None:
-        update_fields.append("doi = %s")
-        params.append(paper_update.doi)
-        
-    if not update_fields:
-        conn.close()
-        return dict(existing_paper)
-        
-    params.append(paper_id)
-    query = f"UPDATE papers SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
-    
-    cursor.execute(query, tuple(params))
-    updated_paper = cursor.fetchone()
-    conn.commit()
-    
-    # If color changed, update node metadata
-    if paper_update.color is not None:
-        try:
-            nodes = get_nodes_by_paper(paper_id)
-            if nodes:
-                node_ids = [n['id'] for n in nodes]
-                update_nodes_by_ids(node_ids, {'paper_color': paper_update.color})
-        except Exception as e:
-            print(f"Error updating node metadata: {e}")
-            
-    # If DOI changed/added, fetch metadata
-    if paper_update.doi is not None:
-        doi = paper_update.doi
-        # Run in background or directly? Directly for now as it's a user action
-        # Re-use logic similar to upload (should refactor, but inline for now)
-        try:
-            # Connect specifically for this metadata update
-            meta_conn = get_db_connection()
-            meta_cursor = meta_conn.cursor()
-            
-            # CrossRef
-            metadata = crossref_service.fetch_metadata(doi)
-            if metadata:
-                if metadata.get("abstract"):
-                    meta_cursor.execute("UPDATE papers SET abstract = %s WHERE id = %s", (metadata["abstract"], paper_id))
-                
-                references = metadata.get("references", [])
-                for ref in references:
-                    meta_cursor.execute("""
-                        INSERT INTO paper_references 
-                        (paper_id, referenced_doi, referenced_title, referenced_authors, referenced_year, source)
-                        VALUES (%s, %s, %s, %s, %s, 'crossref')
-                    """, (paper_id, ref.get("doi"), ref.get("title"), str(ref.get("authors")), int(ref["year"]) if ref.get("year") and str(ref["year"]).isdigit() else None))
-            
-            # Semantic Scholar Citations
-            ss_paper_ids = semantic_scholar_service.resolve_dois([doi])
-            if ss_paper_ids:
-                citations = semantic_scholar_service.get_citations(ss_paper_ids[0], limit=50)
-                for cit in citations:
-                     meta_cursor.execute("""
-                        INSERT INTO paper_citations
-                        (paper_id, citing_paper_id, citing_doi, citing_title, citing_authors, citing_year, source)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'semanticscholar')
-                    """, (paper_id, cit.get("paperId"), cit.get("doi"), cit.get("title"), str(cit.get("authors")), cit.get("year")))
-            
-            meta_conn.commit()
-            meta_conn.close()
-        except Exception as e:
-            print(f"Error updating metadata updates: {e}")
-            
-    conn.close()
-    
-    paper = dict(updated_paper)
-    paper['url'] = f"/api/papers/{paper_id}/pdf"
+        print(f"Chunk extraction/embedding failed: {e}")
+
+    # Auto-enrich metadata from external APIs (best-effort)
+    try:
+        meta = fetch_paper_metadata(doi=doi, title=title, arxiv_id=arxiv_id)
+        if meta:
+            fields, params = [], []
+            if meta.get("title"):
+                fields.append("title = %s"); params.append(meta["title"])
+            if meta.get("doi") and not doi:
+                fields.append("doi = %s"); params.append(meta["doi"])
+            if meta.get("abstract"):
+                fields.append("abstract = %s"); params.append(meta["abstract"])
+            if fields:
+                params.append(paper_id)
+                paper = execute_returning(
+                    f"UPDATE papers SET {', '.join(fields)} WHERE id = %s RETURNING *",
+                    tuple(params)
+                )
+    except Exception as e:
+        print(f"Metadata auto-fetch failed: {e}")
+
     return paper
+
+
+@app.post("/papers", response_model=Paper)
+def upload_paper(file: UploadFile = File(...)):
+    pdf_bytes = file.file.read()
+    paper = _create_paper_from_upload(pdf_bytes, file.filename)
+    return _paper_with_meta(paper)
+
+
+@app.post("/projects/{project_id}/papers", response_model=Paper)
+def upload_paper_to_project(project_id: int, file: UploadFile = File(...)):
+    project = fetchone("SELECT id FROM projects WHERE id = %s", (project_id,))
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    pdf_bytes = file.file.read()
+    paper = _create_paper_from_upload(pdf_bytes, file.filename)
+    execute(
+        "INSERT INTO paper_projects (paper_id, project_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (paper["id"], project_id)
+    )
+    return _paper_with_meta(paper)
+
+
+@app.post("/papers/{paper_id}/projects/{project_id}")
+def add_paper_to_project(paper_id: int, project_id: int):
+    execute(
+        "INSERT INTO paper_projects (paper_id, project_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (paper_id, project_id)
+    )
+    return {"message": "Paper added to project"}
+
+
+@app.delete("/papers/{paper_id}/projects/{project_id}")
+def remove_paper_from_project(paper_id: int, project_id: int):
+    execute(
+        "DELETE FROM paper_projects WHERE paper_id = %s AND project_id = %s",
+        (paper_id, project_id)
+    )
+    return {"message": "Paper removed from project"}
+
+
+@app.patch("/papers/{paper_id}", response_model=Paper)
+def update_paper(paper_id: int, update: PaperUpdate):
+    row = fetchone("SELECT * FROM papers WHERE id = %s", (paper_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    fields, params = [], []
+    if update.title is not None:
+        fields.append("title = %s"); params.append(update.title)
+    if update.doi is not None:
+        fields.append("doi = %s"); params.append(update.doi)
+    if update.arxiv_id is not None:
+        fields.append("arxiv_id = %s"); params.append(update.arxiv_id)
+    if update.abstract is not None:
+        fields.append("abstract = %s"); params.append(update.abstract)
+    if not fields:
+        return _paper_with_meta(row)
+
+    params.append(paper_id)
+    updated = execute_returning(
+        f"UPDATE papers SET {', '.join(fields)} WHERE id = %s RETURNING *", tuple(params)
+    )
+    return _paper_with_meta(updated)
 
 
 @app.delete("/papers/{paper_id}")
 def delete_paper(paper_id: int):
-    # Get paper info first to know which project it belongs to
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT project_id, filename FROM papers WHERE id = %s", (paper_id,))
-    row = cursor.fetchone()
-    
+    row = fetchone("SELECT filename FROM papers WHERE id = %s", (paper_id,))
     if not row:
         raise HTTPException(status_code=404, detail="Paper not found")
-    
-    project_id = row["project_id"]
-    filename = row["filename"]
-    
-    # Delete the paper from database
-    cursor.execute("DELETE FROM papers WHERE id = %s", (paper_id,))
-    conn.commit()
-    conn.close()
-    
-    # Delete PDF from S3
-    pdf_key = f"pdfs/{project_id}/{filename}"
-    storage_service.delete_file(pdf_key)
-    
-    # Remove all nodes belonging to this paper
+    execute("DELETE FROM papers WHERE id = %s", (paper_id,))
     try:
-        nodes = get_nodes_by_paper(paper_id)
-        
-        if nodes:
-            # Delete images from S3 if any
-            for node in nodes:
-                # Get full node data to check type and content
-                full_nodes = get_nodes_by_ids([node['id']], include_embeddings=False)
-                if full_nodes:
-                    full_node = full_nodes[0]
-                    if full_node.get("type") == "image":
-                        image_key = full_node.get("content")
-                        if image_key:
-                            storage_service.delete_file(image_key)
-
-            count = delete_nodes_by_paper(paper_id)
-            print(f"Successfully deleted {count} nodes for paper {paper_id}")
-        else:
-            print(f"No nodes found to delete for paper {paper_id}")
+        storage.delete(f"pdfs/{paper_id}/{row['filename']}")
     except Exception as e:
-        print(f"Error removing nodes: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    return {"message": "Paper and associated nodes deleted successfully"}
+        print(f"Could not delete PDF from storage: {e}")
+    return {"message": "Paper deleted"}
 
-@app.post("/projects/{project_id}/upload/")
-def upload_pdf(project_id: int, file: UploadFile = File(...)):
-    # Read file content first
-    file_bytes = file.file.read()
-    
-    # Upload PDF to S3
-    pdf_key = f"pdfs/{project_id}/{file.filename}"
-    # Create a new BytesIO object for upload since upload_fileobj might close it
-    storage_service.upload_file(io.BytesIO(file_bytes), pdf_key, content_type="application/pdf")
-    
-    # Generate a random color for this paper
-    def generate_color():
-        colors = [
-            "#EF4444", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6",
-            "#EC4899", "#14B8A6", "#F97316", "#06B6D4", "#6366F1"
-        ]
-        return random.choice(colors)
-    
-    paper_color = generate_color()
-    
-    # Save Paper Metadata with color
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO papers (project_id, title, filename, color) VALUES (%s, %s, %s, %s) RETURNING id",
-        (project_id, file.filename, file.filename, paper_color)
+
+@app.post("/papers/{paper_id}/fetch-metadata", response_model=PaperMetadataResult)
+def fetch_metadata(paper_id: int, req: FetchMetadataRequest):
+    row = fetchone("SELECT * FROM papers WHERE id = %s", (paper_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    doi = req.doi if req.doi is not None else row.get("doi")
+    arxiv_id = req.arxiv_id if req.arxiv_id is not None else row.get("arxiv_id")
+    title = req.title if req.title is not None else row.get("title")
+
+    meta = fetch_paper_metadata(doi=doi, title=title, arxiv_id=arxiv_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="No metadata found for this paper")
+
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Passages
+# ---------------------------------------------------------------------------
+
+def _passage_with_tags(row: dict) -> dict:
+    passage = dict(row)
+    passage["rects"] = json.loads(passage.get("rects") or "[]")
+    passage["tags"] = fetchall("""
+        SELECT t.* FROM tags t
+        JOIN passage_tags pt ON pt.tag_id = t.id
+        WHERE pt.passage_id = %s
+    """, (passage["id"],))
+    return passage
+
+
+@app.get("/papers/{paper_id}/passages", response_model=List[Passage])
+def list_passages(paper_id: int):
+    rows = fetchall(
+        "SELECT * FROM passages WHERE paper_id = %s ORDER BY page, created_at",
+        (paper_id,)
     )
-    paper_id = cursor.fetchone()[0]
+    return [_passage_with_tags(r) for r in rows]
+
+
+@app.post("/papers/{paper_id}/passages", response_model=Passage)
+def create_passage(paper_id: int, passage: PassageCreate):
+    paper = fetchone("SELECT id FROM papers WHERE id = %s", (paper_id,))
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    row = execute_returning(
+        "INSERT INTO passages (paper_id, page, text, rects, color) VALUES (%s, %s, %s, %s, %s) RETURNING *",
+        (paper_id, passage.page, passage.text, json.dumps(passage.rects), passage.color)
+    )
+
+    # Generate and store embedding
+    try:
+        emb = get_embedding_service().embed(passage.text)
+        execute(
+            "UPDATE passages SET embedding = %s WHERE id = %s",
+            (embedding_to_json(emb), row["id"])
+        )
+    except Exception as e:
+        print(f"Passage embedding failed: {e}")
+
+    return _passage_with_tags(row)
+
+
+@app.patch("/passages/{passage_id}", response_model=Passage)
+def update_passage(passage_id: int, update: PassageUpdate):
+    row = fetchone("SELECT * FROM passages WHERE id = %s", (passage_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Passage not found")
+
+    if update.color is not None:
+        row = execute_returning(
+            "UPDATE passages SET color = %s WHERE id = %s RETURNING *",
+            (update.color, passage_id)
+        )
+    return _passage_with_tags(row)
+
+
+@app.delete("/passages/{passage_id}")
+def delete_passage(passage_id: int):
+    tag_ids = [r["tag_id"] for r in fetchall(
+        "SELECT tag_id FROM passage_tags WHERE passage_id = %s", (passage_id,)
+    )]
+    execute("DELETE FROM passages WHERE id = %s", (passage_id,))
+    for tag_id in tag_ids:
+        still_used = fetchone("SELECT 1 FROM passage_tags WHERE tag_id = %s LIMIT 1", (tag_id,))
+        if not still_used:
+            execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+    return {"message": "Passage deleted"}
+
+
+@app.post("/passages/{passage_id}/links/{other_id}", response_model=PassageLink)
+def create_passage_link(passage_id: int, other_id: int):
+    p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
+    
+    conn = get_db_connection()
+    from psycopg2.extras import RealDictCursor
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        "INSERT INTO passage_links (passage_id_1, passage_id_2) VALUES (%s, %s) ON CONFLICT DO NOTHING RETURNING *",
+        (p1, p2)
+    )
+    row = cur.fetchone()
     conn.commit()
     conn.close()
-    
-    # Process PDF (pass bytes directly)
-    nodes, extracted_doi = pdf_processor.process_pdf(io.BytesIO(file_bytes), paper_id)
-    
-    # If DOI found, update the paper record and fetch additional metadata
-    if extracted_doi:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 1. Update DOI
-        cursor.execute("UPDATE papers SET doi = %s WHERE id = %s", (extracted_doi, paper_id))
-        
-        # 2. Fetch Metadata & References from CrossRef
-        print(f"Fetching CrossRef metadata for {extracted_doi}...")
-        try:
-            metadata = crossref_service.fetch_metadata(extracted_doi)
-            if metadata:
-                # Update Paper Title/Abstract
-                update_fields = []
-                params = []
-                
-                # Optionally update title if it looks better? keeping original filename-based title might be safer initially,
-                # but let's update abstract for sure.
-                if metadata.get("title"):
-                     # We can update title if we want, but user might have set a custom one?
-                     # Let's simple update title if it is the default filename one?
-                     pass
 
-                if metadata.get("abstract"):
-                    update_fields.append("abstract = %s")
-                    params.append(metadata["abstract"])
-                
-                if update_fields:
-                    params.append(paper_id)
-                    query = f"UPDATE papers SET {', '.join(update_fields)} WHERE id = %s"
-                    cursor.execute(query, tuple(params))
-                    print(f"Updated metadata for paper {paper_id}")
-
-                # Store References (Outgoing)
-                references = metadata.get("references", [])
-                if references:
-                    print(f"Found {len(references)} references")
-                    for ref in references:
-                        cursor.execute("""
-                            INSERT INTO paper_references 
-                            (paper_id, referenced_doi, referenced_title, referenced_authors, referenced_year, source)
-                            VALUES (%s, %s, %s, %s, %s, 'crossref')
-                        """, (
-                            paper_id,
-                            ref.get("doi"),
-                            ref.get("title"),
-                            str(ref.get("authors")) if ref.get("authors") else None,
-                            int(ref["year"]) if ref.get("year") and str(ref["year"]).isdigit() else None
-                        ))
-
-        except Exception as e:
-            print(f"Error fetching CrossRef data: {e}")
-
-        # 3. Fetch Citations (Incoming) from Semantic Scholar
-        print(f"Fetching citations for {extracted_doi}...")
-        try:
-            # First resolve DOI to PaperID
-            ss_paper_ids = semantic_scholar_service.resolve_dois([extracted_doi])
-            if ss_paper_ids:
-                ss_paper_id = ss_paper_ids[0]
-                citations = semantic_scholar_service.get_citations(ss_paper_id, limit=50) # limit to avoid overwhelming
-                
-                if citations:
-                    print(f"Found {len(citations)} citations")
-                    for cit in citations:
-                         cursor.execute("""
-                            INSERT INTO paper_citations
-                            (paper_id, citing_paper_id, citing_doi, citing_title, citing_authors, citing_year, source)
-                            VALUES (%s, %s, %s, %s, %s, %s, 'semanticscholar')
-                        """, (
-                            paper_id,
-                            cit.get("paperId"),
-                            cit.get("doi"),
-                            cit.get("title"),
-                            str(cit.get("authors")),
-                            cit.get("year")
-                        ))
-        except Exception as e:
-            print(f"Error fetching citations: {e}")
-
-        conn.commit()
-        conn.close()
-        print(f"Stored DOI and metadata for paper {paper_id}: {extracted_doi}")
-    
-    # Generate Embeddings
-    nodes = embedding_service.generate_embeddings(nodes)
-    
-    # Filter out nodes with empty embeddings
-    valid_nodes = [node for node in nodes if node.get("embedding") is not None and len(node.get("embedding", [])) > 0]
-    
-    if len(valid_nodes) == 0:
-        return {"message": "File uploaded but no valid embeddings generated", "paper_id": paper_id, "nodes_count": 0}
-    
-    
-    # Save to database with pgvector
-    nodes_to_insert = []
-    for node in valid_nodes:
-        nodes_to_insert.append({
-            'id': node['id'],
-            'project_id': project_id,
-            'paper_id': node['paper_id'],
-            'note_id': None,
-            'type': node['type'],
-            'content': node['content'],
-            'page_number': node['page_number'],
-            'bbox': str(node['bbox']),
-            'paper_color': paper_color,
-            'title': None,
-            'embedding': node['embedding']
-        })
-    
-    count = insert_nodes(nodes_to_insert)
-    
-    return {"message": "File uploaded and processed successfully", "paper_id": paper_id, "nodes_count": count}
-
-@app.get("/projects/{project_id}/graph", response_model=GraphData)
-def get_project_graph(project_id: int, use_new_embeddings: bool = False):
-    # Fetch all nodes for the project
-    db_nodes = get_nodes_by_project(project_id, include_embeddings=True)
-    
-    nodes = []
-    node_ids = []
-    if db_nodes:
-        node_ids = [n['id'] for n in db_nodes]
-        
-        # Fetch tag information for all nodes in one query
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("""
-            SELECT DISTINCT node_id
-            FROM node_tags
-            WHERE node_id = ANY(%s)
-        """, (node_ids,))
-        tagged_node_ids = {row["node_id"] for row in cursor.fetchall()}
-        conn.close()
-        
-        for db_node in db_nodes:
-            # If it's an image, generate a presigned URL
-            content = db_node["content"]
-            if db_node["type"] == "image":
-                content = storage_service.get_presigned_url(content)
-            
-            node = {
-                "id": db_node["id"],
-                "type": db_node["type"],
-                "content": content,
-                "page_number": db_node["page_number"],
-                "paper_id": db_node["paper_id"],
-                "paper_color": db_node.get("paper_color", "#3B82F6"),
-                "bbox": eval(db_node["bbox"]) if db_node.get("bbox") else [],
-                "embedding": db_node.get("embedding"),
-                "has_tags": db_node["id"] in tagged_node_ids,
-                "title": db_node.get("title"),
-                "note_id": db_node.get("note_id")
-            }
-            
-            # Include tag_scores if they exist
-            if db_node.get("tag_scores"):
-                import json
-                tag_scores_dict = json.loads(db_node["tag_scores"])
-                node["tag_scores"] = tag_scores_dict
-                
-                # If use_new_embeddings is true, use tag scores as embedding for PCA layout
-                if use_new_embeddings:
-                    # Convert tag_scores dict to a list of values (maintain consistent order)
-                    tag_score_values = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
-                    if len(tag_score_values) > 0:
-                        node["embedding"] = tag_score_values
-            
-            nodes.append(node)
-            
-    # Fetch all links for this project
-    links = []
-    if node_ids:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("""
-            SELECT * FROM links 
-            WHERE source_node_id = ANY(%s) OR target_node_id = ANY(%s)
-        """, (node_ids, node_ids))
-        links = [dict(row) for row in cursor.fetchall()]
-        conn.close()
-
-    graph_data = graph_service.build_graph(nodes, links=links)
-    return graph_data
-
-@app.get("/")
-def read_root():
-    return {"message": "Paper Explorer API is running"}
-
-@app.post("/tags/", response_model=Tag)
-def create_tag(tag: TagCreate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    try:
-        cursor.execute(
-            "INSERT INTO tags (name, type, project_id) VALUES (%s, %s, %s) RETURNING *",
-            (tag.name, tag.type, tag.project_id)
+    if not row:
+        row = fetchone(
+            "SELECT * FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s",
+            (p1, p2)
         )
-        new_tag = cursor.fetchone()
-        conn.commit()
-        return dict(new_tag)
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail="Tag already exists")
-    finally:
-        conn.close()
+    return row
+
+
+@app.get("/passages/{passage_id}/links", response_model=List[PassageLink])
+def get_passage_links(passage_id: int):
+    return fetchall(
+        "SELECT * FROM passage_links WHERE passage_id_1 = %s OR passage_id_2 = %s ORDER BY created_at DESC",
+        (passage_id, passage_id)
+    )
+
+
+@app.delete("/passages/{passage_id}/links/{other_id}")
+def delete_passage_link(passage_id: int, other_id: int):
+    p1, p2 = min(passage_id, other_id), max(passage_id, other_id)
+    execute("DELETE FROM passage_links WHERE passage_id_1 = %s AND passage_id_2 = %s", (p1, p2))
+    return {"message": "Link deleted"}
+
+
+@app.get("/papers/{paper_id}/links", response_model=List[PassageLinkDetail])
+def get_paper_links(paper_id: int):
+    rows = fetchall(
+        """
+        SELECT pl.id, pl.created_at, pl.passage_id_1, pl.passage_id_2,
+               p1.text AS text1, p1.page AS page1, p1.rects AS rects1, p1.paper_id AS pid1,
+               p2.text AS text2, p2.page AS page2, p2.rects AS rects2, p2.paper_id AS pid2,
+               pa1.title AS title1, pa2.title AS title2
+        FROM passage_links pl
+        JOIN passages p1 ON pl.passage_id_1 = p1.id
+        JOIN passages p2 ON pl.passage_id_2 = p2.id
+        JOIN papers pa1 ON p1.paper_id = pa1.id
+        JOIN papers pa2 ON p2.paper_id = pa2.id
+        WHERE p1.paper_id = %s OR p2.paper_id = %s
+        ORDER BY pl.created_at DESC
+        """,
+        (paper_id, paper_id)
+    )
+    result = []
+    for r in rows:
+        local_is_1 = r["pid1"] == paper_id
+        result.append({
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "local_passage_id": r["passage_id_1"] if local_is_1 else r["passage_id_2"],
+            "local_passage_text": r["text1"] if local_is_1 else r["text2"],
+            "local_page": r["page1"] if local_is_1 else r["page2"],
+            "remote_passage_id": r["passage_id_2"] if local_is_1 else r["passage_id_1"],
+            "remote_passage_text": r["text2"] if local_is_1 else r["text1"],
+            "remote_page": r["page2"] if local_is_1 else r["page1"],
+            "remote_rects": json.loads((r["rects2"] if local_is_1 else r["rects1"]) or "[]"),
+            "remote_paper_id": r["pid2"] if local_is_1 else r["pid1"],
+            "remote_paper_title": r["title2"] if local_is_1 else r["title1"],
+        })
+    return result
+
+
+@app.get("/passages/{passage_id}/similar", response_model=List[SimilarPassage])
+def get_similar_passages(passage_id: int, limit: int = 10, project_id: Optional[int] = None):
+    passage = fetchone("SELECT * FROM passages WHERE id = %s", (passage_id,))
+    if not passage:
+        raise HTTPException(status_code=404, detail="Passage not found")
+
+    query_emb = json_to_embedding(passage.get("embedding"))
+    if not query_emb:
+        raise HTTPException(status_code=400, detail="Passage has no embedding yet")
+
+    if project_id is None:
+        proj_row = fetchone("SELECT project_id FROM paper_projects WHERE paper_id = %s", (passage["paper_id"],))
+        if proj_row:
+            project_id = proj_row["project_id"]
+
+    model = None
+    if project_id is not None:
+        model = load_similarity_model(project_id)
+
+    if project_id is not None:
+        subquery = "%s"
+        params_passage = (project_id, passage["paper_id"])
+        params_chunk = (project_id, passage["paper_id"])
+    else:
+        subquery = "SELECT project_id FROM paper_projects WHERE paper_id = %s"
+        params_passage = (passage["paper_id"], passage["paper_id"])
+        params_chunk = (passage["paper_id"], passage["paper_id"])
+
+    # Passage candidates (highlights from other papers in the same project)
+    passage_rows = fetchall("""
+        SELECT p.*, pa.title as paper_title, 'passage' as source
+        FROM passages p
+        JOIN papers pa ON pa.id = p.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = {}
+        AND pa.id != %s
+        AND p.embedding IS NOT NULL
+    """.format(subquery), params_passage)
+
+    # Chunk candidates (raw chunks from other papers in the same project)
+    chunk_rows = fetchall("""
+        SELECT c.*, pa.title as paper_title, 'chunk' as source
+        FROM chunks c
+        JOIN papers pa ON pa.id = c.paper_id
+        JOIN paper_projects pp ON pp.paper_id = pa.id
+        WHERE pp.project_id = {}
+        AND pa.id != %s
+        AND c.embedding IS NOT NULL
+    """.format(subquery), params_chunk)
+
+    all_rows = passage_rows + chunk_rows
+    candidates = [
+        {"id": (r["source"], r["id"]), "embedding": json_to_embedding(r["embedding"]), "_row": r}
+        for r in all_rows
+    ]
+
+    results = find_similar(query_emb, candidates, limit=limit, model=model)
+
+    row_map = {(r["source"], r["id"]): r for r in all_rows}
+    similar = []
+    for key, sim in results:
+        r = row_map[key]
+        tags = _passage_with_tags(r)["tags"] if r["source"] == "passage" else []
+        similar.append({
+            "passage_id": r["id"],
+            "paper_id": r["paper_id"],
+            "paper_title": r["paper_title"],
+            "page": r["page"],
+            "text": r["text"],
+            "similarity": sim,
+            "rects": json.loads(r.get("rects") or "[]"),
+            "tags": tags,
+            "source": r["source"],
+        })
+    return similar
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
 
 @app.get("/projects/{project_id}/tags", response_model=List[Tag])
 def list_tags(project_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Fetch global tags AND local tags for this project
-    cursor.execute(
-        "SELECT * FROM tags WHERE type = 'global' OR (type = 'local' AND project_id = %s) ORDER BY name",
-        (project_id,)
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+    return fetchall("""
+        SELECT * FROM tags
+        WHERE project_id = %s OR project_id IS NULL
+        ORDER BY type, name
+    """, (project_id,))
 
-@app.post("/nodes/{node_id}/tags")
-def add_node_tag(node_id: str, tag_id: int = Form(...)):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
+
+@app.post("/tags", response_model=Tag)
+def create_tag(tag: TagCreate):
     try:
-        # Get the project_id for this node by querying the tag
-        cursor.execute("SELECT project_id, type FROM tags WHERE id = %s", (tag_id,))
-        tag_row = cursor.fetchone()
-        
-        if not tag_row:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Tag not found")
-        
-        # Determine project_id: use tag's project_id if local, or find node's project
-        if tag_row['type'] == 'local' and tag_row['project_id']:
-            project_id = tag_row['project_id']
-        else:
-            # For global tags, we need to find which project this node belongs to
-            cursor.execute("SELECT project_id FROM nodes WHERE id = %s", (node_id,))
-            node_row = cursor.fetchone()
-            
-            if not node_row:
-                conn.close()
-                raise HTTPException(status_code=404, detail="Node not found in any project")
-            
-            project_id = node_row['project_id']
-        
-        # Insert the tag assignment
-        cursor.execute(
-            "INSERT INTO node_tags (tag_id, node_id) VALUES (%s, %s)",
-            (tag_id, node_id)
+        return execute_returning(
+            "INSERT INTO tags (name, type, project_id) VALUES (%s, %s, %s) RETURNING *",
+            (tag.name, tag.type, tag.project_id)
         )
-        conn.commit()
-        # conn.close()
-        
-        # # Train SVM and compute tag scores
-        # try:
-        #     train_result = tag_service.train_and_store_model(project_id, use_global_context=False)
-        #     nodes_scored = tag_service.compute_tag_scores(project_id)
-        #     print(f"SVM trained with {train_result['num_training_samples']} samples, {nodes_scored} nodes scored")
-        # except ValueError as e:
-        #     # If training fails (e.g., not enough samples), that's okay for the first tag assignment
-        #     print(f"Warning: Could not train SVM: {e}")
-        
-        return {"message": "Tag added to node"}
     except psycopg2.IntegrityError:
-        conn.rollback()
-        conn.close()
-        raise HTTPException(status_code=400, detail="Tag already assigned to this node")
-    except Exception as e:
-        conn.rollback()
-        conn.close()
-        raise
+        raise HTTPException(status_code=400, detail="Tag already exists")
 
-@app.delete("/nodes/{node_id}/tags/{tag_id}")
-def remove_node_tag(node_id: str, tag_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute(
-        "DELETE FROM node_tags WHERE node_id = %s AND tag_id = %s",
-        (node_id, tag_id)
-    )
-    conn.commit()
-    conn.close()
-    
-    return {"message": "Tag removed from node"}
 
-@app.get("/nodes/{node_id}/tags", response_model=List[Tag])
-def get_node_tags(node_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    cursor.execute("""
-        SELECT t.* 
-        FROM tags t
-        JOIN node_tags nt ON t.id = nt.tag_id
-        WHERE nt.node_id = %s
-        ORDER BY t.name
-    """, (node_id,))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+@app.patch("/tags/{tag_id}", response_model=Tag)
+def update_tag(tag_id: int, update: TagUpdate):
+    row = fetchone("SELECT * FROM tags WHERE id = %s", (tag_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    if update.name:
+        row = execute_returning(
+            "UPDATE tags SET name = %s WHERE id = %s RETURNING *",
+            (update.name, tag_id)
+        )
+    return row
+
 
 @app.delete("/tags/{tag_id}")
 def delete_tag(tag_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
+    execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+    return {"message": "Tag deleted"}
+
+
+@app.post("/passages/{passage_id}/tags/{tag_id}")
+def add_passage_tag(passage_id: int, tag_id: int):
     try:
-        # Delete the tag (cascade should handle node_tags if configured, but let's be safe)
-        # First delete from node_tags
-        cursor.execute("DELETE FROM node_tags WHERE tag_id = %s", (tag_id,))
-        # Then delete the tag
-        cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
-        conn.commit()
-        return {"message": "Tag deleted successfully"}
-    except Exception as e:
-        conn.rollback()
-        print(f"Error deleting tag: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete tag")
-    finally:
-        conn.close()
-
-@app.patch("/tags/{tag_id}", response_model=Tag)
-def update_tag(tag_id: int, tag_update: TagUpdate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    try:
-        # Check if tag exists
-        cursor.execute("SELECT * FROM tags WHERE id = %s", (tag_id,))
-        existing_tag = cursor.fetchone()
-        
-        if not existing_tag:
-            raise HTTPException(status_code=404, detail="Tag not found")
-            
-        if tag_update.name:
-            # Check if a tag with the new name already exists in the same scope
-            # Scope is defined by (name, type, project_id)
-            cursor.execute("""
-                SELECT * FROM tags 
-                WHERE name = %s 
-                AND type = %s 
-                AND project_id IS NOT DISTINCT FROM %s
-                AND id != %s
-            """, (
-                tag_update.name, 
-                existing_tag['type'], 
-                existing_tag['project_id'], 
-                tag_id
-            ))
-            target_tag = cursor.fetchone()
-            
-            if target_tag:
-                # MERGE LOGIC
-                target_tag_id = target_tag['id']
-                
-                # 1. Move nodes from old tag to new tag, ignoring duplicates
-                # We select all nodes from the old tag and try to insert them for the new tag
-                # ON CONFLICT DO NOTHING handles cases where the node already has the new tag
-                cursor.execute("""
-                    INSERT INTO node_tags (tag_id, node_id)
-                    SELECT %s, node_id FROM node_tags WHERE tag_id = %s
-                    ON CONFLICT (tag_id, node_id) DO NOTHING
-                """, (target_tag_id, tag_id))
-                
-                # 2. Delete old tag (cascade will remove remaining node_tags entries for old tag)
-                cursor.execute("DELETE FROM tags WHERE id = %s", (tag_id,))
-                
-                conn.commit()
-                return dict(target_tag)
-            
-            else:
-                # NORMAL RENAME
-                cursor.execute(
-                    "UPDATE tags SET name = %s WHERE id = %s RETURNING *",
-                    (tag_update.name, tag_id)
-                )
-                updated_tag = cursor.fetchone()
-                conn.commit()
-                return dict(updated_tag)
-            
-        return dict(existing_tag)
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail="Tag name already exists")
-    finally:
-        conn.close()
-
-@app.get("/projects/{project_id}/tags/{tag_id}/nodes")
-def get_tag_nodes(project_id: int, tag_id: int):
-    """Get all nodes in a project that have a specific tag"""
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get nodes from this project that have the tag
-    # We need to join with papers to filter by project_id
-    cursor.execute("""
-        SELECT 
-            nt.node_id,
-            nt.created_at as tagged_at
-        FROM node_tags nt
-        JOIN tags t ON nt.tag_id = t.id
-        -- We need to check if the node belongs to the project
-        -- Since node_id is a string from ChromaDB/PDF processing, we can't directly join with papers table easily 
-        -- unless we parse the node_id or look up in ChromaDB.
-        -- However, our node_id format usually implies paper_id or we can fetch metadata.
-        -- BUT, for now let's rely on the fact that we can fetch node metadata from ChromaDB.
-        WHERE nt.tag_id = %s
-    """, (tag_id,))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    
-    if not rows:
-        return []
-        
-    # Fetch the actual node content from database
-    node_ids = [row['node_id'] for row in rows]
-    
-    try:
-        db_nodes = get_nodes_by_ids(node_ids, include_embeddings=False)
-        
-        # Create a map for quick lookup
-        nodes_map = {n['id']: n for n in db_nodes}
-        
-        # Merge data
-        tagged_nodes = []
-        for row in rows:
-            nid = row['node_id']
-            if nid in nodes_map:
-                node_data = nodes_map[nid]
-                
-                # Only include if it belongs to the requested project
-                if node_data.get('project_id') == project_id:
-                    tagged_nodes.append({
-                        "node_id": nid,
-                        "content": node_data.get('content', ''),
-                        "page_number": node_data.get('page_number'),
-                        "paper_id": node_data.get('paper_id'),
-                        "paper_color": node_data.get('paper_color'),
-                        "bbox": eval(node_data.get('bbox', '[]')) if node_data.get('bbox') else [],
-                        "tagged_at": row['tagged_at']
-                    })
-                    
-        return tagged_nodes
-        
-    except Exception as e:
-        print(f"Error fetching node details: {e}")
-        return []
-
-def _get_project_papers(project_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT id FROM papers WHERE project_id = %s", (project_id,))
-    rows = cursor.fetchall()
-    conn.close()
-
-@app.post("/projects/{project_id}/discover")
-def discover_papers(project_id: int):
-    try:
-        recommendations = discovery_service.discover_papers(project_id)
-        return recommendations
-    except Exception as e:
-        print(f"Error discovering papers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-@app.get("/projects/{project_id}/tags/summary", response_model=List[TagSummary])
-def get_tag_summary(project_id: int):
-    """Get summary of all tags with node counts for a project"""
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get all tags (global + local for this project) with node counts
-    cursor.execute("""
-        SELECT 
-            t.id as tag_id,
-            t.name as tag_name,
-            t.type as tag_type,
-            COUNT(nt.node_id) as node_count
-        FROM tags t
-        LEFT JOIN node_tags nt ON t.id = nt.tag_id
-        WHERE t.type = 'global' OR (t.type = 'local' AND t.project_id = %s)
-        GROUP BY t.id, t.name, t.type
-        ORDER BY t.name
-    """, (project_id,))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_global_tagged_nodes_from_all_projects(exclude_project_id: int) -> List[dict]:
-    """
-    Fetch all nodes from all projects (except the specified one) that have at least one global tag.
-    Returns a list of node dictionaries with embeddings and tags.
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get all project IDs except the current one
-    cursor.execute("SELECT id FROM projects WHERE id != %s", (exclude_project_id,))
-    project_rows = cursor.fetchall()
-    project_ids = [row["id"] for row in project_rows]
-    
-    all_external_nodes = []
-    
-    for project_id in project_ids:
-        try:
-            # Get all nodes from this project
-            db_nodes = get_nodes_by_project(project_id, include_embeddings=True)
-            
-            if not db_nodes:
-                continue
-            
-            # Get all node IDs for this project
-            node_ids = [n['id'] for n in db_nodes]
-            
-            # Fetch tags for these nodes - only keep nodes with global tags
-            cursor.execute("""
-                SELECT nt.node_id, t.id as tag_id, t.name as tag_name, t.type as tag_type
-                FROM node_tags nt
-                JOIN tags t ON nt.tag_id = t.id
-                WHERE nt.node_id = ANY(%s) AND t.type = 'global'
-                ORDER BY nt.node_id, t.name
-            """, (node_ids,))
-            
-            tag_rows = cursor.fetchall()
-            
-            # Build a map of node_id -> list of global tags
-            node_tags_map = {}
-            for row in tag_rows:
-                node_id = row["node_id"]
-                if node_id not in node_tags_map:
-                    node_tags_map[node_id] = []
-                node_tags_map[node_id].append({
-                    "tag_id": row["tag_id"],
-                    "tag_name": row["tag_name"],
-                    "tag_type": row["tag_type"]
-                })
-            
-            # Build node list - only include nodes that have global tags
-            for db_node in db_nodes:
-                node_id = db_node['id']
-                if node_id in node_tags_map:  # Only include if has global tags
-                    all_external_nodes.append({
-                        "id": node_id,
-                        "embedding": db_node.get('embedding'),
-                        "tags": node_tags_map[node_id]
-                    })
-                    
-        except Exception as e:
-            print(f"Error fetching nodes from project {project_id}: {e}")
-            continue
-    
-    conn.close()
-    return all_external_nodes
-
-@app.post("/projects/{project_id}/tags/train", response_model=TrainModelResponse)
-def train_tag_model(project_id: int, request: TrainModelRequest):
-    """Train SVM model for tag suggestions"""
-    try:
-        # Train and store the model
-        train_result = tag_service.train_and_store_model(project_id, request.use_global_context)
-        
-        # Compute and store tag scores for all nodes
-        nodes_scored = tag_service.compute_tag_scores(project_id)
-        
-        return TrainModelResponse(
-            status="success",
-            message=f"Successfully trained model and computed tag scores for {nodes_scored} nodes",
-            num_training_samples=train_result['num_training_samples'],
-            num_tags=train_result['num_tags'],
-            nodes_scored=nodes_scored
+        execute(
+            "INSERT INTO passage_tags (passage_id, tag_id) VALUES (%s, %s)",
+            (passage_id, tag_id)
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        print(f"Error training model: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to train model: {str(e)}")
+    except psycopg2.IntegrityError:
+        pass  # already tagged
+    return {"message": "Tag added"}
 
-@app.post("/projects/{project_id}/notes/", response_model=Note)
-def create_note(project_id: int, note: NoteCreate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # 1. Create Note in DB
-    cursor.execute(
-        "INSERT INTO notes (project_id, title, content, color) VALUES (%s, %s, %s, %s) RETURNING *",
-        (project_id, note.title, note.content, note.color)
+
+@app.delete("/passages/{passage_id}/tags/{tag_id}")
+def remove_passage_tag(passage_id: int, tag_id: int):
+    execute(
+        "DELETE FROM passage_tags WHERE passage_id = %s AND tag_id = %s",
+        (passage_id, tag_id)
     )
-    new_note = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    
-    # 2. Generate Embedding
-    embedding = embedding_service.generate_text_embedding(note.content)
-    
-    # 3. Save to database as a node
-    chroma_id = f"note_{new_note['id']}"
-    
-    node_to_insert = {
-        'id': chroma_id,
-        'project_id': project_id,
-        'paper_id': None,
-        'note_id': new_note['id'],
-        'type': 'note',
-        'content': note.content,
-        'page_number': None,
-        'bbox': '[]',
-        'paper_color': note.color,
-        'title': note.title or '',
-        'embedding': embedding
-    }
-    
-    insert_nodes([node_to_insert])
-    
-    # 4. Compute tag scores for the new note (if models exist)
-    try:
-        tag_service.compute_tag_scores(project_id, node_ids=[chroma_id])
-    except Exception as e:
-        # It's okay if this fails (e.g. no models trained yet)
-        print(f"Could not compute tag scores for new note: {e}")
-    
-    return dict(new_note)
+    still_used = fetchone(
+        "SELECT 1 FROM passage_tags WHERE tag_id = %s LIMIT 1",
+        (tag_id,)
+    )
+    if not still_used:
+        execute("DELETE FROM tags WHERE id = %s", (tag_id,))
+    return {"message": "Tag removed"}
 
-@app.get("/projects/{project_id}/notes/", response_model=List[Note])
-def list_notes(project_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT * FROM notes WHERE project_id = %s ORDER BY created_at DESC", (project_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+
+@app.get("/tags/{tag_id}/passages", response_model=List[Passage])
+def get_tag_passages(tag_id: int):
+    rows = fetchall("""
+        SELECT p.* FROM passages p
+        JOIN passage_tags pt ON pt.passage_id = p.id
+        WHERE pt.tag_id = %s
+        ORDER BY p.paper_id, p.page
+    """, (tag_id,))
+    return [_passage_with_tags(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Notes
+# ---------------------------------------------------------------------------
+
+def _note_with_links(row: dict) -> dict:
+    note = dict(row)
+    note["passage_ids"] = [
+        r["passage_id"] for r in
+        fetchall("SELECT passage_id FROM note_passages WHERE note_id = %s", (note["id"],))
+    ]
+    note["tag_ids"] = [
+        r["tag_id"] for r in
+        fetchall("SELECT tag_id FROM note_tags WHERE note_id = %s", (note["id"],))
+    ]
+    return note
+
+
+@app.post("/notes", response_model=Note)
+def create_note(note: NoteCreate):
+    row = execute_returning(
+        "INSERT INTO notes (type, content) VALUES (%s, %s) RETURNING *",
+        (note.type, note.content)
+    )
+    note_id = row["id"]
+
+    for pid in (note.passage_ids or []):
+        execute("INSERT INTO note_passages (note_id, passage_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (note_id, pid))
+    for tid in (note.tag_ids or []):
+        execute("INSERT INTO note_tags (note_id, tag_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (note_id, tid))
+
+    try:
+        emb = get_embedding_service().embed(note.content)
+        execute("UPDATE notes SET embedding = %s WHERE id = %s",
+                (embedding_to_json(emb), note_id))
+    except Exception as e:
+        print(f"Note embedding failed: {e}")
+
+    return _note_with_links(row)
+
+
+@app.get("/passages/{passage_id}/notes", response_model=List[Note])
+def get_passage_notes(passage_id: int):
+    rows = fetchall("""
+        SELECT n.* FROM notes n
+        JOIN note_passages np ON np.note_id = n.id
+        WHERE np.passage_id = %s
+        ORDER BY n.created_at DESC
+    """, (passage_id,))
+    return [_note_with_links(r) for r in rows]
+
+
+@app.get("/tags/{tag_id}/notes", response_model=List[Note])
+def get_tag_notes(tag_id: int):
+    rows = fetchall("""
+        SELECT n.* FROM notes n
+        JOIN note_tags nt ON nt.note_id = n.id
+        WHERE nt.tag_id = %s
+        ORDER BY n.created_at DESC
+    """, (tag_id,))
+    return [_note_with_links(r) for r in rows]
+
 
 @app.patch("/notes/{note_id}", response_model=Note)
-def update_note(note_id: int, note_update: NoteUpdate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Check if note exists
-    cursor.execute("SELECT * FROM notes WHERE id = %s", (note_id,))
-    existing_note = cursor.fetchone()
-    
-    if not existing_note:
-        conn.close()
+def update_note(note_id: int, update: NoteUpdate):
+    row = fetchone("SELECT * FROM notes WHERE id = %s", (note_id,))
+    if not row:
         raise HTTPException(status_code=404, detail="Note not found")
-    
-    # Build update query
-    update_fields = []
-    params = []
-    
-    if note_update.title is not None:
-        update_fields.append("title = %s")
-        params.append(note_update.title)
-        
-    if note_update.content is not None:
-        update_fields.append("content = %s")
-        params.append(note_update.content)
-        
-    if note_update.color is not None:
-        update_fields.append("color = %s")
-        params.append(note_update.color)
-        
-    update_fields.append("updated_at = CURRENT_TIMESTAMP")
-        
-    if not update_fields:
-        conn.close()
-        return dict(existing_note)
-        
-    params.append(note_id)
-    query = f"UPDATE notes SET {', '.join(update_fields)} WHERE id = %s RETURNING *"
-    
-    cursor.execute(query, tuple(params))
-    updated_note = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    
-    # Update node in database if content or color changed
-    if note_update.content is not None or note_update.color is not None or note_update.title is not None:
+    if update.content is not None:
+        row = execute_returning(
+            "UPDATE notes SET content = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s RETURNING *",
+            (update.content, note_id)
+        )
         try:
-            chroma_id = f"note_{note_id}"
-            
-            updates = {}
-            if note_update.color is not None:
-                updates['paper_color'] = note_update.color
-            if note_update.title is not None:
-                updates['title'] = note_update.title
-            if note_update.content is not None:
-                updates['content'] = note_update.content
-                # Update embedding if content changed
-                new_embedding = embedding_service.generate_text_embedding(note_update.content)
-                updates['embedding'] = new_embedding
-            
-            update_node_metadata(chroma_id, updates)
-            
-            # Compute tag scores for the updated note (if models exist)
-            try:
-                tag_service.compute_tag_scores(existing_note['project_id'], node_ids=[chroma_id])
-            except Exception as e:
-                print(f"Could not compute tag scores for updated note: {e}")
-
+            emb = get_embedding_service().embed(update.content)
+            execute("UPDATE notes SET embedding = %s WHERE id = %s",
+                    (embedding_to_json(emb), note_id))
         except Exception as e:
-            print(f"Error updating node for note: {e}")
-            
-    return dict(updated_note)
+            print(f"Note embedding update failed: {e}")
+    return _note_with_links(row)
+
 
 @app.delete("/notes/{note_id}")
 def delete_note(note_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    cursor.execute("SELECT project_id FROM notes WHERE id = %s", (note_id,))
-    row = cursor.fetchone()
-    
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Note not found")
-        
-    project_id = row['project_id']
-    
-    cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
-    conn.commit()
-    conn.close()
-    
-    # Delete node from database (CASCADE will handle it via note_id FK)
-    # But we need to explicitly delete it since we're deleting the note first
-    try:
-        chroma_id = f"note_{note_id}"
-        conn_del = get_db_connection()
-        cursor_del = conn_del.cursor()
-        cursor_del.execute("DELETE FROM nodes WHERE id = %s", (chroma_id,))
-        conn_del.commit()
-        conn_del.close()
-    except Exception as e:
-        print(f"Error deleting node for note: {e}")
-        
-    return {"message": "Note deleted successfully"}
+    execute("DELETE FROM notes WHERE id = %s", (note_id,))
+    return {"message": "Note deleted"}
 
-@app.get("/notes/{note_id}/similar", response_model=List[dict])
-def get_similar_nodes(note_id: int, limit: int = 50, use_new_embeddings: bool = False):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get note content and project_id
-    cursor.execute("SELECT content, project_id FROM notes WHERE id = %s", (note_id,))
-    note = cursor.fetchone()
-    conn.close()
-    
-    if not note:
-        raise HTTPException(status_code=404, detail="Note not found")
-        
-    project_id = note['project_id']
-    
-    # Get the note's node from database
-    chroma_note_id = f"note_{note_id}"
-    note_nodes = get_nodes_by_ids([chroma_note_id], include_embeddings=True)
-    
-    if not note_nodes:
-        raise HTTPException(status_code=404, detail="Note embedding not found")
-    
-    note_node = note_nodes[0]
-    
-    # Get query embedding based on mode
-    if use_new_embeddings:
-        # Try to get tag_scores from node
-        tag_scores_str = note_node.get('tag_scores')
-        
-        if not tag_scores_str:
-            raise HTTPException(
-                status_code=400, 
-                detail="New embeddings not computed. Please compute embeddings first in Advanced View."
-            )
-        
+
+# ---------------------------------------------------------------------------
+# Q&A: question → relevant chunks + LLM-synthesized answer
+# ---------------------------------------------------------------------------
+
+@app.post("/papers/{paper_id}/search", response_model=SearchResponse)
+def search_paper(paper_id: int, query: SearchQuery):
+    paper = fetchone("SELECT title FROM papers WHERE id = %s", (paper_id,))
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    try:
+        query_emb = get_embedding_service().embed(query.query)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Embedding service unavailable: {e}")
+
+    # Load project-specific similarity model if available
+    proj_row = fetchone("SELECT project_id FROM paper_projects WHERE paper_id = %s", (paper_id,))
+    model = None
+    if proj_row:
+        model = load_similarity_model(proj_row["project_id"])
+
+    chunks_raw = fetchall(
+        "SELECT * FROM chunks WHERE paper_id = %s AND embedding IS NOT NULL",
+        (paper_id,)
+    )
+    candidates = [
+        {"id": r["id"], "embedding": json_to_embedding(r["embedding"])}
+        for r in chunks_raw
+    ]
+
+    results = find_similar(query_emb, candidates, limit=query.limit, model=model)
+    row_map = {r["id"]: r for r in chunks_raw}
+
+    chunks = [
+        ChunkResult(
+            chunk_id=cid,
+            page=row_map[cid]["page"],
+            text=row_map[cid]["text"],
+            similarity=sim,
+            rects=json.loads(row_map[cid].get("rects") or "[]"),
+        )
+        for cid, sim in results
+    ]
+
+    # Try to synthesize an answer with the LLM
+    answer = None
+    if chunks:
         try:
-            import json
-            tag_scores_dict = json.loads(tag_scores_str)
-            # Convert to list maintaining consistent order
-            query_embedding = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse tag scores: {e}")
-    else:
-        # Use original embedding
-        query_embedding = note_node.get('embedding')
-        if query_embedding is None:
-            raise HTTPException(status_code=404, detail="Note embedding not found")
-    
-    
-    # NEW: Fetch connected nodes for context
-    connected_nodes = []
-    try:
-        # Get links where note is source or target
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("""
-            SELECT source_node_id, target_node_id
-            FROM links 
-            WHERE source_node_id = %s OR target_node_id = %s
-        """, (chroma_note_id, chroma_note_id))
-        link_rows = cursor.fetchall()
-        
-        # Extract connected node IDs (excluding the note itself)
-        connected_ids = set()
-        for row in link_rows:
-            if row['source_node_id'] != chroma_note_id:
-                connected_ids.add(row['source_node_id'])
-            if row['target_node_id'] != chroma_note_id:
-                connected_ids.add(row['target_node_id'])
-        
-        if connected_ids:
-            # Fetch connected nodes with embeddings
-            connected_nodes = get_nodes_by_ids(list(connected_ids), include_embeddings=True)
-            print(f"Found {len(connected_nodes)} connected nodes for context")
-            
-    except Exception as e:
-        print(f"Error fetching connected nodes: {e}")
-        # Continue without context if fails
-    
-    # Prepare query embeddings list
-    query_embeddings = []
-    
-    # Add note embedding (primary query)
-    if use_new_embeddings:
-        query_embeddings.append(query_embedding) # already processed above
-    else:
-        query_embeddings.append(query_embedding)
-        
-    # Add connected nodes embeddings
-    for c_node in connected_nodes:
-        if use_new_embeddings:
-             # Try to get tag_scores from node
-            tag_scores_str = c_node.get('tag_scores')
-            if tag_scores_str:
-                try:
-                    import json
-                    tag_scores_dict = json.loads(tag_scores_str)
-                    # Convert to list maintaining consistent order
-                    c_emb = [tag_scores_dict[tag] for tag in sorted(tag_scores_dict.keys())]
-                    query_embeddings.append(c_emb)
-                except Exception:
-                    pass
-        else:
-            c_emb = c_node.get('embedding')
-            if c_emb and len(c_emb) > 0:
-                query_embeddings.append(c_emb)
-
-    # Fetch all nodes from the project
-    all_nodes = get_nodes_by_project(project_id, include_embeddings=True)
-    
-    if not all_nodes:
-        return []
-
-    # Fetch papers for title mapping
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute("SELECT id, title FROM papers WHERE project_id = %s", (project_id,))
-    paper_map = {row['id']: row['title'] for row in cursor.fetchall()}
-    conn.close()
-    
-    # Group nodes by paper
-    nodes_by_paper = {}
-    for db_node in all_nodes:
-        paper_id = db_node.get('paper_id')
-        if not paper_id:
-            continue  # Skip nodes without paper (e.g., notes)
-        
-        if paper_id not in nodes_by_paper:
-            nodes_by_paper[paper_id] = []
-        
-        # Build metadata dict from node fields
-        metadata = {
-            "type": db_node.get("type"),
-            "content": db_node.get("content"),
-            "page_number": db_node.get("page_number"),
-            "paper_id": db_node.get("paper_id"),
-            "paper_color": db_node.get("paper_color"),
-            "bbox": db_node.get("bbox"),
-            "title": db_node.get("title")
-        }
-        
-        # Add tag_scores if using new embeddings
-        if use_new_embeddings and db_node.get("tag_scores"):
-            metadata["new_embedding"] = db_node.get("tag_scores")
-        
-        nodes_by_paper[paper_id].append({
-            'id': db_node['id'],
-            'embedding': db_node.get('embedding'),
-            'metadata': metadata,
-            'document': db_node.get('content', '')
-        })
-    
-    print(f"Grouped nodes into {len(nodes_by_paper)} papers")
-    
-    # Per-paper similarity search with enhanced flow
-    all_paper_final_results = []
-    
-    # Define how many top nodes to get per paper
-    nodes_per_paper = max(5, limit // max(len(nodes_by_paper), 1))
-    context_size = 1  # Number of preceding/succeeding nodes to include
-    
-    # Construct query texts for reranking and excerpt extraction
-    query_texts = []
-    if note.get('content'):
-        query_texts.append(note['content'])
-        
-    for c_node in connected_nodes:
-        c_text = c_node.get('content')
-        if c_text and isinstance(c_text, str) and len(c_text.strip()) > 0:
-            query_texts.append(c_text)
-    
-    for paper_id, paper_nodes in nodes_by_paper.items():
-        paper_title = paper_map.get(paper_id, 'Untitled')
-        print(f"\nProcessing paper {paper_id} ('{paper_title}')...")
-        
-        # Step 1: Initial similarity search on paper nodes
-        initial_results = similarity_service.find_similar_nodes(
-            query_embeddings=query_embeddings,
-            nodes=paper_nodes,
-            limit=nodes_per_paper,
-            use_new_embeddings=use_new_embeddings
-        )
-        
-        if not initial_results:
-            print(f"  No initial results for paper {paper_id}")
-            continue
-        
-        print(f"  Found {len(initial_results)} initial results")
-        
-        # Step 2: Collect nodes with context for LLM excerpt extraction
-        nodes_with_context = []
-        seen_node_ids = set()
-        
-        for node_id, score, metadata in initial_results:
-            # Get context nodes (preceding + target + succeeding)
-            context_nodes_list = get_context_nodes(
-                paper_id=paper_id,
-                node_id=node_id,
-                context_size=context_size,
-                include_embeddings=False
+            context = "\n\n---\n\n".join(
+                f"[Page {c.page + 1}] {c.text}" for c in chunks[:5]
             )
-            
-            for ctx_node in context_nodes_list:
-                if ctx_node['id'] not in seen_node_ids:
-                    nodes_with_context.append(ctx_node)
-                    seen_node_ids.add(ctx_node['id'])
-        
-        print(f"  Collected {len(nodes_with_context)} nodes with context for LLM")
-        
-        # Step 3: Extract LLM excerpts from focused nodes
-        paper_excerpts = {}
-        if query_texts and note.get('content') and nodes_with_context:
-            try:
-                paper_excerpts = similarity_service.extract_paper_excerpts(
-                    query_text=note['content'],
-                    papers_data=[(paper_id, nodes_with_context, paper_title)],
-                    num_excerpts=3,
-                    max_excerpt_length=1000
-                )
-            except Exception as e:
-                print(f"  Excerpt extraction failed for paper {paper_id}: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # Step 4: Generate embeddings from LLM excerpts
-        excerpt_embeddings = []
-        if paper_id in paper_excerpts:
-            for excerpt in paper_excerpts[paper_id]:
-                try:
-                    excerpt_emb = embedding_service.generate_text_embedding(excerpt)
-                    if excerpt_emb:
-                        excerpt_embeddings.append(excerpt_emb)
-                except Exception as e:
-                    print(f"  Failed to generate embedding for excerpt: {e}")
-        
-        print(f"  Generated {len(excerpt_embeddings)} excerpt embeddings")
-        
-        # Step 5: NEW similarity search using excerpt embeddings
-        excerpt_results = []
-        if excerpt_embeddings:
-            try:
-                excerpt_results = similarity_service.find_similar_nodes(
-                    query_embeddings=excerpt_embeddings,
-                    nodes=paper_nodes,
-                    limit=nodes_per_paper,
-                    use_new_embeddings=use_new_embeddings
-                )
-                print(f"  Found {len(excerpt_results)} nodes via excerpt search")
-            except Exception as e:
-                print(f"  Excerpt-based search failed: {e}")
-        
-        # Step 6: Merge initial results + excerpt results (deduplicate)
-        merged_results = {}  # node_id -> (node_id, max_score, metadata)
-        
-        # Add initial results
-        for node_id, score, metadata in initial_results:
-            merged_results[node_id] = (node_id, score, metadata)
-        
-        # Add excerpt results, keeping higher score if duplicate
-        for node_id, score, metadata in excerpt_results:
-            if node_id in merged_results:
-                existing_score = merged_results[node_id][1]
-                if score > existing_score:
-                    merged_results[node_id] = (node_id, score, metadata)
-            else:
-                merged_results[node_id] = (node_id, score, metadata)
-        
-        merged_list = list(merged_results.values())
-        merged_list.sort(key=lambda x: x[1], reverse=True)
-        print(f"  Merged to {len(merged_list)} unique results")
-        
-        # Step 7: Rerank merged results using excerpts
-        if query_texts and merged_list:
-            try:
-                reranked = similarity_service.rerank_results(
-                    query_texts=query_texts,
-                    results=merged_list,
-                    top_k=nodes_per_paper,
-                    paper_excerpts=paper_excerpts
-                )
-                all_paper_final_results.extend(reranked)
-                print(f"  Reranked to top {len(reranked)} results")
-            except Exception as e:
-                print(f"  Reranking failed for paper {paper_id}: {e}")
-                all_paper_final_results.extend(merged_list[:nodes_per_paper])
-        else:
-            all_paper_final_results.extend(merged_list[:nodes_per_paper])
-    
-    print(f"\nTotal results from all papers: {len(all_paper_final_results)}")
-    
-    # Step 8: Final merge - sort all per-paper results by score and limit
-    all_paper_final_results.sort(key=lambda x: x[1], reverse=True)
-    similar_results = all_paper_final_results[:limit + 1]
-    
-    # Build response
-    similar_nodes = []
-    for node_id, similarity, metadata in similar_results:
-        # Skip the note itself
-        if node_id == chroma_note_id:
+            answer = get_llm_service().complete(
+                prompt=(
+                    f"Question: {query.query}\n\n"
+                    f"Relevant passages from \"{paper['title']}\":\n\n{context}\n\n"
+                    "Answer the question based only on the passages above. "
+                    "Be concise. If the passages don't contain enough information, say so."
+                ),
+                system="You are a research assistant helping a scientist understand a paper. Answer questions based strictly on the provided passages.",
+            )
+        except Exception as e:
+            print(f"LLM synthesis failed: {e}")
+
+    return SearchResponse(answer=answer, chunks=chunks)
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/normalize-chunk-rects")
+def normalize_chunk_rects():
+    """One-time migration: convert chunk rects from absolute PDF-point coords to 0-1 normalized."""
+    import fitz
+
+    paper_rows = fetchall("SELECT DISTINCT c.paper_id FROM chunks c")
+    updated = 0
+    errors = []
+
+    for row in paper_rows:
+        paper_id = row["paper_id"]
+        paper = fetchone("SELECT filename FROM papers WHERE id = %s", (paper_id,))
+        if not paper:
             continue
-        
-        # Resolve paper title
-        paper_title = None
-        if metadata.get("paper_id") and metadata.get("paper_id") in paper_map:
-            paper_title = paper_map[metadata.get("paper_id")]
-        
-        # Construct node object
-        node = {
-            "id": node_id,
-            "type": metadata.get("type", "text"),
-            "content": metadata.get("content", ""),
-            "page_number": metadata.get("page_number"),
-            "paper_id": metadata.get("paper_id"),
-            "paper_title": paper_title,
-            "paper_color": metadata.get("paper_color"),
-            "bbox": eval(metadata.get("bbox", "[]")) if metadata.get("bbox") else [],
-            "similarity": similarity,
-            "title": metadata.get("title")
-        }
-        
-        # If image, generate presigned URL
-        if node["type"] == "image":
-            node["content"] = storage_service.get_presigned_url(metadata.get("content"))
-            
-        similar_nodes.append(node)
-        
-        # Stop once we have enough results (excluding the note itself)
-        if len(similar_nodes) >= limit:
-            break
-    
-    return similar_nodes
+        try:
+            pdf_bytes = storage.download(f"pdfs/{paper_id}/{paper['filename']}")
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            page_dims = {i: (p.rect.width or 612, p.rect.height or 792) for i, p in enumerate(doc)}
+            doc.close()
+        except Exception as e:
+            errors.append(f"paper {paper_id}: {e}")
+            continue
+
+        chunks = fetchall("SELECT id, page, rects FROM chunks WHERE paper_id = %s", (paper_id,))
+        for chunk in chunks:
+            rects = json.loads(chunk.get("rects") or "[]")
+            if not rects:
+                continue
+            r = rects[0]
+            # skip already-normalized rects
+            if r.get("x", 0) <= 2 and r.get("y", 0) <= 2:
+                continue
+            pw, ph = page_dims.get(chunk["page"], (612, 792))
+            normalized = [{"x": rc["x"] / pw, "y": rc["y"] / ph,
+                           "width": rc["width"] / pw, "height": rc["height"] / ph}
+                          for rc in rects]
+            execute("UPDATE chunks SET rects = %s WHERE id = %s",
+                    (json.dumps(normalized), chunk["id"]))
+            updated += 1
+
+    return {"updated": updated, "errors": errors}
 
 
-@app.post("/links/", response_model=Link)
-def create_link(link: LinkCreate):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
+@app.get("/")
+def root():
+    return {"message": "Paper Explorer API v2"}
+
+
+@app.get("/health")
+def health():
+    """Check connectivity to embedding and LLM services."""
+    status = {"api": "ok", "embedding": "unknown", "llm": "unknown"}
+
     try:
-        cursor.execute(
-            "INSERT INTO links (source_node_id, target_node_id, type) VALUES (%s, %s, %s) RETURNING *",
-            (link.source_node_id, link.target_node_id, link.type)
-        )
-        new_link = cursor.fetchone()
-        conn.commit()
-        return dict(new_link)
-    except psycopg2.IntegrityError:
-        conn.rollback()
-        # If link already exists, just return it
-        cursor.execute(
-            "SELECT * FROM links WHERE source_node_id = %s AND target_node_id = %s",
-            (link.source_node_id, link.target_node_id)
-        )
-        existing_link = cursor.fetchone()
-        return dict(existing_link)
-    finally:
-        conn.close()
-
-@app.get("/links/{node_id}", response_model=List[Link])
-def get_node_links(node_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    
-    # Get links where node is source OR target
-    cursor.execute("""
-        SELECT * FROM links 
-        WHERE source_node_id = %s OR target_node_id = %s
-        ORDER BY created_at DESC
-    """, (node_id, node_id))
-    
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-@app.delete("/links/")
-def delete_link(source_node_id: str, target_node_id: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Delete link regardless of direction (or check both directions)
-        # Since our unique constraint is (source, target), we should be careful.
-        # But usually we want to remove the connection.
-        # Let's try to delete both directions just in case, or specific one.
-        # For now, let's delete the specific direction requested.
-        cursor.execute(
-            "DELETE FROM links WHERE source_node_id = %s AND target_node_id = %s",
-            (source_node_id, target_node_id)
-        )
-        
-        # Also try the reverse direction if we want bidirectional deletion?
-        # For now let's stick to explicit deletion.
-        
-        conn.commit()
-        return {"message": "Link deleted successfully"}
+        get_embedding_service().embed("health check")
+        status["embedding"] = "ok"
     except Exception as e:
-        conn.rollback()
-        print(f"Error deleting link: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete link")
-    finally:
-        conn.close()
+        status["embedding"] = f"error: {e}"
+
+    try:
+        get_llm_service().complete("Reply with the single word: ok", system="Reply with exactly one word.")
+        status["llm"] = "ok"
+    except Exception as e:
+        status["llm"] = f"error: {e}"
+
+    return status
