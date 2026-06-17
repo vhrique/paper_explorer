@@ -1,143 +1,155 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import Optional, List
 from datetime import datetime
 
-class ProjectBase(BaseModel):
+
+class ProjectCreate(BaseModel):
     name: str
     description: Optional[str] = None
-
-class ProjectCreate(ProjectBase):
-    pass
-
-class Project(ProjectBase):
-    id: int
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
 
-class PaperBase(BaseModel):
-    title: str
-    filename: str
-
-class Paper(BaseModel):
+class Project(BaseModel):
     id: int
-    project_id: int
-    title: str
-    filename: str
-    url: Optional[str] = None
-    doi: Optional[str] = None
-    color: str = "#3B82F6"  # Default blue color
-    description: Optional[str] = None
+    name: str
+    description: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
 
 class PaperUpdate(BaseModel):
     title: Optional[str] = None
-    color: Optional[str] = None
-    description: Optional[str] = None
     doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    abstract: Optional[str] = None
 
-class Node(BaseModel):
-    id: str
-    type: str  # "text" or "image"
-    content: str  # text content or image path/base64
-    page_number: int
-    bbox: List[float]
-    paper_id: int
-    embedding_id: Optional[str] = None
+class Paper(BaseModel):
+    id: int
+    title: str
+    filename: str
+    doi: Optional[str]
+    arxiv_id: Optional[str] = None
+    abstract: Optional[str]
+    created_at: datetime
+    url: Optional[str] = None
+    project_ids: Optional[List[int]] = []
 
-class GraphData(BaseModel):
-    nodes: List[Dict[str, Any]]
-    edges: List[Dict[str, Any]]
 
-class TagBase(BaseModel):
+class TagCreate(BaseModel):
     name: str
-    type: str # 'global' or 'local'
-    project_id: Optional[int] = None
-
-class TagCreate(TagBase):
-    pass
+    type: str  # 'content' | 'paper'
+    project_id: Optional[int] = None  # None = global
 
 class TagUpdate(BaseModel):
     name: Optional[str] = None
 
-
-class Tag(TagBase):
+class Tag(BaseModel):
     id: int
+    name: str
+    type: str
+    project_id: Optional[int]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
 
-class NodeTag(BaseModel):
-    tag_id: int
-    node_id: str
-    created_at: datetime
+class PassageCreate(BaseModel):
+    page: int
+    text: str
+    rects: List[dict]  # [{x, y, width, height}]
+    color: Optional[str] = '#FDE047'
 
-    class Config:
-        from_attributes = True
-
-class TagSummary(BaseModel):
-    tag_id: int
-    tag_name: str
-    tag_type: str
-    node_count: int
-
-class ComputeEmbeddingsResponse(BaseModel):
-    status: str
-    message: str
-    nodes_processed: int
-
-class NoteBase(BaseModel):
-    title: Optional[str] = None
-    content: str
-    color: Optional[str] = "#FEF3C7" # Default sticky note yellow
-
-class NoteCreate(NoteBase):
-    project_id: int
-
-class NoteUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
+class PassageUpdate(BaseModel):
     color: Optional[str] = None
 
-class Note(NoteBase):
+class Passage(BaseModel):
     id: int
-    project_id: int
+    paper_id: int
+    page: int
+    text: str
+    rects: List[dict]
+    color: str
+    created_at: datetime
+    tags: Optional[List[Tag]] = []
+
+
+class NoteCreate(BaseModel):
+    type: str  # 'passage' | 'tag'
+    content: str
+    passage_ids: Optional[List[int]] = []
+    tag_ids: Optional[List[int]] = []
+
+class NoteUpdate(BaseModel):
+    content: Optional[str] = None
+
+class Note(BaseModel):
+    id: int
+    type: str
+    content: str
     created_at: datetime
     updated_at: datetime
+    passage_ids: Optional[List[int]] = []
+    tag_ids: Optional[List[int]] = []
 
-    class Config:
-        from_attributes = True
 
-class LinkBase(BaseModel):
-    source_node_id: str
-    target_node_id: str
-    type: Optional[str] = "manual"
+class SearchQuery(BaseModel):
+    query: str
+    limit: Optional[int] = 10
 
-class LinkCreate(LinkBase):
-    pass
+class ChunkResult(BaseModel):
+    chunk_id: int
+    page: int
+    text: str
+    similarity: float
+    rects: Optional[List[dict]] = []
 
-class Link(LinkBase):
+class SearchResponse(BaseModel):
+    answer: Optional[str] = None   # LLM-synthesized answer; None if LLM unavailable
+    chunks: List[ChunkResult]
+
+class PassageLink(BaseModel):
     id: int
+    passage_id_1: int
+    passage_id_2: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
 
-class TrainModelRequest(BaseModel):
-    use_global_context: bool = False
+class PassageLinkDetail(BaseModel):
+    id: int
+    local_passage_id: int
+    local_passage_text: str
+    local_page: int
+    remote_passage_id: int
+    remote_passage_text: str
+    remote_page: int
+    remote_rects: List[dict]
+    remote_paper_id: int
+    remote_paper_title: str
+    created_at: datetime
 
-class TrainModelResponse(BaseModel):
-    status: str
-    message: str
-    num_training_samples: int
-    num_tags: int
-    nodes_scored: int
+
+class FetchMetadataRequest(BaseModel):
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    title: Optional[str] = None
+
+
+class PaperMetadataResult(BaseModel):
+    title: Optional[str] = None
+    doi: Optional[str] = None
+    abstract: Optional[str] = None
+    authors: Optional[List[str]] = []
+    year: Optional[int] = None
+    venue: Optional[str] = None
+    source: str  # 'semantic_scholar' | 'openalex'
+
+
+class SimilarPassage(BaseModel):
+    passage_id: int
+    paper_id: int
+    paper_title: str
+    page: int
+    text: str
+    similarity: float
+    rects: Optional[List[dict]] = []
+    tags: Optional[List[Tag]] = []
+    source: str = 'passage'  # 'passage' | 'chunk'

@@ -1,210 +1,133 @@
+"""
+PDF processing: extract text chunks with bounding boxes per page.
+Each chunk corresponds to a text block as identified by PyMuPDF.
+"""
+
 import fitz  # PyMuPDF
-import os
-import uuid
-import io
-import re
 from typing import List, Dict, Any
-from .storage import S3StorageService
 
-class PDFProcessor:
-    def __init__(self, storage_service: S3StorageService):
-        self.storage_service = storage_service
 
-    def process_pdf(self, pdf_path: str, paper_id: int) -> tuple[List[Dict[str, Any]], str]:
-        # If pdf_path is a local path (temp file), open it
-        # If it's a bytes object, open it directly
-        if isinstance(pdf_path, str):
-            doc = fitz.open(pdf_path)
-        else:
-            # Assume it's a file-like object or bytes
-            doc = fitz.open(stream=pdf_path, filetype="pdf")
-        nodes = []
-        extracted_doi = ""
+MIN_CHUNK_CHARS = 40  # skip very short blocks (headers, page numbers, etc.)
 
-        # Check for DOI on first page
-        if len(doc) > 0:
-            first_page = doc[0]
-            first_page_text = first_page.get_text()
-            doi = self._extract_doi(first_page_text)
-            if doi:
-                print(f"DOI found on first page: {doi}")
-                extracted_doi = doi
 
-        for page_num, page in enumerate(doc):
-            # Extract Text Blocks
-            blocks = page.get_text("dict")["blocks"]
-            for block in blocks:
-                if block["type"] == 0:  # Text block
-                    # Split block into paragraphs based on line spacing
-                    paragraphs = self._split_block_into_paragraphs(block)
-                    
-                    for para_lines in paragraphs:
-                        # Extract text from paragraph
-                        text = ""
-                        for line in para_lines:
-                            for span in line["spans"]:
-                                text += span["text"] + " "
-                        
-                        text = text.strip()
-                        
-                        if len(text) > 50:  # Filter out short snippets/artifacts
-                            # Calculate bbox for this paragraph
-                            bbox = self._calculate_paragraph_bbox(para_lines)
-                            
-                            nodes.append({
-                                "id": str(uuid.uuid4()),
-                                "type": "text",
-                                "content": text,
-                                "page_number": page_num + 1,
-                                "bbox": bbox,
-                                "paper_id": paper_id
-                            })
+def extract_chunks(pdf_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract text chunks from a PDF.
+    Returns list of {page, text, rects} dicts.
+    rects format: [{x, y, width, height}] in PDF coordinate space.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    chunks = []
 
-            # Extract Images - both regular and inline images
-            image_list = page.get_images(full=True)
-            extracted_xrefs = set()  # Track extracted images to avoid duplicates
-            
-            image_list = [] # so to not process images for now (changing encoder)
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                
-                # Skip if already extracted
-                if xref in extracted_xrefs:
-                    continue
-                
-                try:
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image_ext = base_image["ext"]
-                    image_width = base_image.get("width", 0)
-                    image_height = base_image.get("height", 0)
-                    
-                    # Skip very small images (likely artifacts, icons, or decorations)
-                    if image_width < 20 or image_height < 20:
-                        continue
-                    
-                    image_filename = f"images/{paper_id}_p{page_num+1}_{img_index}.{image_ext}"
-                    
-                    # Upload to S3
-                    file_obj = io.BytesIO(image_bytes)
-                    self.storage_service.upload_file(file_obj, image_filename, content_type=f"image/{image_ext}")
-                    
-                    extracted_xrefs.add(xref)
-                    
-                    # Get image bbox
-                    rects = page.get_image_rects(xref)
-                    bbox = [0, 0, 0, 0]
-                    if rects:
-                        bbox = list(rects[0])
+    for page_num, page in enumerate(doc):
+        blocks = page.get_text("blocks", sort=True)  # (x0, y0, x1, y1, text, block_no, block_type)
+        pw = page.rect.width or 1
+        ph = page.rect.height or 1
+        for block in blocks:
+            x0, y0, x1, y1, text, *_ = block
+            text = text.strip()
+            if len(text) < MIN_CHUNK_CHARS:
+                continue
+            chunks.append({
+                "page": page_num,
+                "text": text,
+                "rects": [{
+                    "x": x0 / pw,
+                    "y": y0 / ph,
+                    "width": (x1 - x0) / pw,
+                    "height": (y1 - y0) / ph,
+                }]
+            })
 
-                    nodes.append({
-                        "id": str(uuid.uuid4()),
-                        "type": "image",
-                        "content": image_filename, # Store the S3 key
-                        "page_number": page_num + 1,
-                        "bbox": bbox,
-                        "paper_id": paper_id
-                    })
-                    
-                    print(f"Extracted image: {image_filename} ({image_width}x{image_height})")
-                    
-                except Exception as e:
-                    print(f"Failed to extract image {xref} from page {page_num+1}: {str(e)}")
-                    continue
+    doc.close()
+    return chunks
 
-        print(f"Processed PDF: {len([n for n in nodes if n['type'] == 'text'])} text blocks, {len([n for n in nodes if n['type'] == 'image'])} images")
-        return nodes, extracted_doi
-    
-    def _split_block_into_paragraphs(self, block, gap_factor=0.5, indent_threshold=8.0):
-        """
-        Split a block into paragraphs using both vertical spacing and indentation.
 
-        Args:
-            block: PyMuPDF text block dictionary
-            gap_factor: fraction of line height that triggers paragraph via vertical gap
-            indent_threshold: minimal left-indent increase (points) signifying a new paragraph
+_BAD_TITLE_WORDS = {"microsoft", "word", "latex", "adobe", "untitled", "document"}
 
-        Returns:
-            List of paragraph line groups (each a list of PyMuPDF line dicts)
-        """
-        paragraphs = []
-        current_para_lines = []
 
-        prev_line_bottom = None
-        prev_line_left = None
+def extract_title_from_pdf(pdf_bytes: bytes) -> str | None:
+    """
+    Extract paper title from PDF.
+    Tries PDF metadata first, then falls back to the block with the largest
+    average font size on the first page.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        for line in block["lines"]:
-            bbox = line["bbox"]
-            line_left = bbox[0]
-            line_top = bbox[1]
-            line_bottom = bbox[3]
-            line_height = line_bottom - line_top
+    # Try embedded metadata
+    meta_title = (doc.metadata.get("title") or "").strip()
+    if meta_title and 5 < len(meta_title) < 500:
+        lower = meta_title.lower()
+        if not any(w in lower for w in _BAD_TITLE_WORDS):
+            doc.close()
+            return meta_title
 
-            new_para = False
+    # Heuristic: block with largest average font size on page 0
+    if len(doc) > 0:
+        page = doc[0]
+        best_text: str | None = None
+        best_size = 0.0
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            spans = [s for line in block.get("lines", []) for s in line.get("spans", [])]
+            if not spans:
+                continue
+            avg_size = sum(s.get("size", 0) for s in spans) / len(spans)
+            text = " ".join(s.get("text", "").strip() for s in spans).strip()
+            if avg_size > best_size and 5 < len(text) < 300:
+                best_size = avg_size
+                best_text = text
+        if best_text:
+            doc.close()
+            return best_text
 
-            # --- 1. Vertical-gap paragraph detection ---
-            if prev_line_bottom is not None:
-                gap = line_top - prev_line_bottom
-                if gap > line_height * gap_factor:
-                    new_para = True
+    doc.close()
+    return None
 
-            # --- 2. Indentation-based paragraph detection ---
-            # Detect if this line is indented further right than previous
-            if prev_line_left is not None:
-                indent = line_left - prev_line_left
-                if indent > indent_threshold:
-                    new_para = True
 
-            # If new paragraph detected → commit current one
-            if new_para and current_para_lines:
-                paragraphs.append(current_para_lines)
-                current_para_lines = []
+def extract_doi(pdf_bytes: bytes) -> str | None:
+    """Attempt to extract a DOI from the first page of the PDF only."""
+    import re
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doi_pattern = re.compile(r'\b10\.\d{4,}/\S+', re.IGNORECASE)
 
-            current_para_lines.append(line)
-            prev_line_bottom = line_bottom
-            prev_line_left = line_left
-
-        # Add last collected paragraph
-        if current_para_lines:
-            paragraphs.append(current_para_lines)
-
-        return paragraphs
-    
-    def _calculate_paragraph_bbox(self, lines):
-        """
-        Calculate bounding box from a list of lines.
-        
-        Args:
-            lines: List of PyMuPDF line dictionaries, each with a "bbox" key
-            
-        Returns:
-            List [x0, y0, x1, y1] representing the bounding box
-        """
-        if not lines:
-            return [0, 0, 0, 0]
-        
-        # Get min/max coordinates from all lines
-        x0 = min(line["bbox"][0] for line in lines)
-        y0 = min(line["bbox"][1] for line in lines)
-        x1 = max(line["bbox"][2] for line in lines)
-        y1 = max(line["bbox"][3] for line in lines)
-        
-        return [x0, y0, x1, y1]
-    
-    def _extract_doi(self, text: str) -> str:
-        """
-        Extract DOI from text using regex.
-        
-        Args:
-            text: Text content to search for DOI
-            
-        Returns:
-            DOI string if found, empty string otherwise
-        """
-        # Common DOI regex pattern - matches format like 10.1234/example.article.id
-        doi_pattern = r'\b(10\.\d{4,}/[-._;()/:A-Za-z0-9]+)\b'
-        match = re.search(doi_pattern, text, re.IGNORECASE)
-        
+    if len(doc) > 0:
+        text = doc[0].get_text()
+        match = doi_pattern.search(text)
         if match:
-            return match.group(1)
-        return ""
+            doc.close()
+            return match.group(0).rstrip('.')
+
+    doc.close()
+    return None
+
+
+def extract_arxiv_id(pdf_bytes: bytes) -> str | None:
+    """
+    Extract an arXiv identifier from the first page of the PDF.
+    Returns the bare ID without version suffix (e.g. '2301.07041'), or None.
+    Handles both new-style (YYMM.NNNNN) and old-style (cat/NNNNNNN) IDs.
+    """
+    import re
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # Matches 'arXiv:2301.07041v2', 'arxiv.org/abs/2301.07041', etc.
+    pattern = re.compile(
+        r'(?:arXiv:|arxiv\.org/abs/)'
+        r'(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)',
+        re.IGNORECASE
+    )
+
+    if len(doc) > 0:
+        text = doc[0].get_text()
+        match = pattern.search(text)
+        if match:
+            doc.close()
+            arxiv_id = match.group(1)
+            # Strip version suffix so lookups always get latest metadata
+            arxiv_id = re.sub(r'v\d+$', '', arxiv_id)
+            return arxiv_id
+
+    doc.close()
+    return None

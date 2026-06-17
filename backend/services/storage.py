@@ -1,61 +1,72 @@
-import boto3
+"""
+Storage abstraction: local filesystem or GCS.
+Controlled by STORAGE_BACKEND env var ('local' or 'gcs').
+"""
+
 import os
-from botocore.exceptions import ClientError
+import io
+from pathlib import Path
+from typing import BinaryIO
 
-class S3StorageService:
+
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")
+LOCAL_STORAGE_PATH = os.getenv("LOCAL_STORAGE_PATH", "./storage")
+GCS_BUCKET = os.getenv("GCS_BUCKET_NAME", "paper-explorer")
+
+
+class LocalStorage:
+    def __init__(self, base_path: str = LOCAL_STORAGE_PATH):
+        self.base = Path(base_path)
+        self.base.mkdir(parents=True, exist_ok=True)
+
+    def upload(self, data: BinaryIO, key: str, content_type: str = "application/octet-stream") -> None:
+        dest = self.base / key
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data.read())
+
+    def download(self, key: str) -> bytes:
+        return (self.base / key).read_bytes()
+
+    def delete(self, key: str) -> None:
+        path = self.base / key
+        if path.exists():
+            path.unlink()
+
+    def get_url(self, key: str) -> str:
+        return f"/api/files/{key}"
+
+    def stream(self, key: str):
+        return io.BytesIO(self.download(key))
+
+
+class GCSStorage:
     def __init__(self):
-        self.s3_client = boto3.client(
-            's3',
-            endpoint_url=f"http://{os.getenv('MINIO_ENDPOINT', 'localhost:9000')}",
-            aws_access_key_id=os.getenv('MINIO_ACCESS_KEY', 'minioadmin'),
-            aws_secret_access_key=os.getenv('MINIO_SECRET_KEY', 'minioadmin'),
-            config=boto3.session.Config(signature_version='s3v4')
-        )
-        self.bucket_name = os.getenv('MINIO_BUCKET_NAME', 'paper-explorer')
+        from google.cloud import storage as gcs
+        self.client = gcs.Client()
+        self.bucket = self.client.bucket(GCS_BUCKET)
 
-    def upload_file(self, file_obj, object_name, content_type=None):
-        """Upload a file to an S3 bucket"""
-        try:
-            extra_args = {}
-            if content_type:
-                extra_args['ContentType'] = content_type
-                
-            self.s3_client.upload_fileobj(file_obj, self.bucket_name, object_name, ExtraArgs=extra_args)
-            return True
-        except ClientError as e:
-            print(f"Error uploading file: {e}")
-            return False
+    def upload(self, data: BinaryIO, key: str, content_type: str = "application/octet-stream") -> None:
+        blob = self.bucket.blob(key)
+        blob.upload_from_file(data, content_type=content_type)
 
-    def get_presigned_url(self, object_name, expiration=3600):
-        """Generate a presigned URL to share an S3 object"""
-        try:
-            response = self.s3_client.generate_presigned_url('get_object',
-                                                            Params={'Bucket': self.bucket_name,
-                                                                    'Key': object_name},
-                                                            ExpiresIn=expiration)
-        except ClientError as e:
-            print(f"Error generating presigned URL: {e}")
-            return None
+    def download(self, key: str) -> bytes:
+        blob = self.bucket.blob(key)
+        return blob.download_as_bytes()
 
-        # If running in Docker, the URL might contain the internal container name (minio).
-        # For the frontend (browser) to access it, we might need to replace it with localhost
-        # if we are running locally.
-        # However, since we are mapping ports 9000:9000, localhost:9000 should work if the endpoint was localhost.
-        # But if the endpoint was 'minio:9000' (internal), the signed URL will have 'minio:9000'.
-        # The browser cannot resolve 'minio'.
-        
-        # Hack for local development with Docker Compose:
-        # Replace 'minio:9000' with 'localhost:9000' for browser access
-        if 'minio:9000' in response:
-             response = response.replace('minio:9000', 'localhost:9000')
-             
-        return response
+    def delete(self, key: str) -> None:
+        blob = self.bucket.blob(key)
+        if blob.exists():
+            blob.delete()
 
-    def delete_file(self, object_name):
-        """Delete a file from an S3 bucket"""
-        try:
-            self.s3_client.delete_object(Bucket=self.bucket_name, Key=object_name)
-            return True
-        except ClientError as e:
-            print(f"Error deleting file: {e}")
-            return False
+    def get_url(self, key: str) -> str:
+        blob = self.bucket.blob(key)
+        return blob.generate_signed_url(expiration=3600)
+
+    def stream(self, key: str):
+        return io.BytesIO(self.download(key))
+
+
+def get_storage():
+    if STORAGE_BACKEND == "gcs":
+        return GCSStorage()
+    return LocalStorage()
