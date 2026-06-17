@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type Paper, type Project } from '../api';
-import { FileText, Plus, Trash2, Upload, X } from 'lucide-react';
+import { api, type Paper, type PaperMetadataResult, type Project } from '../api';
+import { FileText, Pencil, Plus, RefreshCw, Trash2, Upload, X } from 'lucide-react';
 
 interface Props {
   onOpenPaper: (paper: Paper, project: Project) => void;
@@ -15,6 +15,14 @@ export function LibraryView({ onOpenPaper }: Props) {
   const [creatingProject, setCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [openAddMenuPaperId, setOpenAddMenuPaperId] = useState<number | null>(null);
+  const [editingPaper, setEditingPaper] = useState<Paper | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDoi, setEditDoi] = useState('');
+  const [editArxivId, setEditArxivId] = useState('');
+  const [editAbstract, setEditAbstract] = useState('');
+  const [fetchedMeta, setFetchedMeta] = useState<PaperMetadataResult | null>(null);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [savingPaper, setSavingPaper] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -42,9 +50,9 @@ export function LibraryView({ onOpenPaper }: Props) {
     if (!file) return;
     setUploading(true);
     try {
-      const paper = await api.uploadPaper(file);
+      const paper = await api.uploadPaper(file, selectedProjectId ?? undefined);
       setAllPapers(prev => [paper, ...prev]);
-      if (selectedProjectId === null) setPapers(prev => [paper, ...prev]);
+      setPapers(prev => [paper, ...prev]);
     } finally {
       setUploading(false);
       e.target.value = '';
@@ -96,6 +104,50 @@ export function LibraryView({ onOpenPaper }: Props) {
     const updated = { ...paper, project_ids: paper.project_ids.filter(id => id !== projectId) };
     setAllPapers(prev => prev.map(p => p.id === paper.id ? updated : p));
     setPapers(prev => prev.map(p => p.id === paper.id ? updated : p));
+  };
+
+  const handleEditPaper = (paper: Paper, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingPaper(paper);
+    setEditTitle(paper.title);
+    setEditDoi(paper.doi || '');
+    setEditArxivId(paper.arxiv_id || '');
+    setEditAbstract(paper.abstract || '');
+    setFetchedMeta(null);
+  };
+
+  const handleFetchMetadata = async () => {
+    if (!editingPaper) return;
+    setFetchingMeta(true);
+    try {
+      const meta = await api.fetchPaperMetadata(editingPaper.id, editDoi || undefined, editArxivId || undefined, editTitle || undefined);
+      setFetchedMeta(meta);
+      if (meta.title) setEditTitle(meta.title);
+      if (meta.doi) setEditDoi(meta.doi);
+      if (meta.abstract) setEditAbstract(meta.abstract);
+    } catch {
+      alert('No metadata found. Try correcting the DOI or title and fetch again.');
+    } finally {
+      setFetchingMeta(false);
+    }
+  };
+
+  const handleSavePaperInfo = async () => {
+    if (!editingPaper) return;
+    setSavingPaper(true);
+    try {
+      const updated = await api.updatePaper(editingPaper.id, {
+        title: editTitle || editingPaper.title,
+        doi: editDoi || undefined,
+        arxiv_id: editArxivId || undefined,
+        abstract: editAbstract || undefined,
+      });
+      setAllPapers(prev => prev.map(p => p.id === updated.id ? updated : p));
+      setPapers(prev => prev.map(p => p.id === updated.id ? updated : p));
+      setEditingPaper(null);
+    } finally {
+      setSavingPaper(false);
+    }
   };
 
   const paperCount = (projectId: number) =>
@@ -208,17 +260,22 @@ export function LibraryView({ onOpenPaper }: Props) {
                   <div
                     key={paper.id}
                     onClick={() => canOpen && handleOpenPaper(paper)}
-                    title={canOpen ? undefined : 'Assign to a project to open'}
                     className={`flex items-center gap-4 p-4 bg-white border border-gray-200 rounded-xl transition-all group ${
-                      canOpen ? 'hover:border-blue-300 hover:shadow-sm cursor-pointer' : 'opacity-60 cursor-default'
+                      canOpen ? 'hover:border-blue-300 hover:shadow-sm cursor-pointer' : 'cursor-default'
                     }`}
                   >
                     <FileText size={18} className="text-red-400 flex-shrink-0" />
                     <div className="min-w-0 flex-1">
-                      <p className="font-medium text-gray-800 truncate">{paper.title}</p>
+                      <p className={`font-medium truncate ${canOpen ? 'text-gray-800' : 'text-gray-400'}`}>{paper.title}</p>
+                      {!canOpen && (
+                        <p className="text-xs text-amber-500 mt-0.5">Add to a project to open</p>
+                      )}
                       <div className="flex items-center flex-wrap gap-1.5 mt-1.5" onClick={e => e.stopPropagation()}>
                         {paper.doi && (
                           <span className="text-xs text-gray-400 mr-1">DOI: {paper.doi}</span>
+                        )}
+                        {paper.arxiv_id && (
+                          <span className="text-xs text-gray-400 mr-1">arXiv: {paper.arxiv_id}</span>
                         )}
                         {paper.project_ids.map(pid => {
                           const proj = projects.find(p => p.id === pid);
@@ -261,6 +318,13 @@ export function LibraryView({ onOpenPaper }: Props) {
                       </div>
                     </div>
                     <button
+                      onClick={e => handleEditPaper(paper, e)}
+                      className="p-1.5 text-gray-300 hover:text-blue-500 rounded opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                      title="Edit paper info"
+                    >
+                      <Pencil size={15} />
+                    </button>
+                    <button
                       onClick={e => handleDeletePaper(paper.id, e)}
                       className="p-1.5 text-gray-300 hover:text-red-500 rounded opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
                     >
@@ -273,6 +337,129 @@ export function LibraryView({ onOpenPaper }: Props) {
           )}
         </div>
       </div>
+      {editingPaper && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+          onClick={() => setEditingPaper(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl w-full max-w-lg flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h3 className="font-semibold text-gray-900">Paper Info</h3>
+              <button onClick={() => setEditingPaper(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4 overflow-y-auto">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Title</label>
+                <input
+                  value={editTitle}
+                  onChange={e => setEditTitle(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">DOI</label>
+                <div className="flex gap-2">
+                  <input
+                    value={editDoi}
+                    onChange={e => setEditDoi(e.target.value)}
+                    placeholder="10.xxxx/xxxxx"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <button
+                    onClick={handleFetchMetadata}
+                    disabled={fetchingMeta}
+                    title="Fetch metadata from Semantic Scholar / OpenAlex"
+                    className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
+                    Fetch
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">arXiv ID</label>
+                <div className="flex gap-2">
+                  <input
+                    value={editArxivId}
+                    onChange={e => setEditArxivId(e.target.value)}
+                    placeholder="2301.07041"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  {!editDoi && (
+                    <button
+                      onClick={handleFetchMetadata}
+                      disabled={fetchingMeta}
+                      title="Fetch metadata using arXiv ID"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
+                      Fetch
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Abstract</label>
+                <textarea
+                  value={editAbstract}
+                  onChange={e => setEditAbstract(e.target.value)}
+                  rows={5}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+                />
+              </div>
+
+              {fetchedMeta && (
+                <div className="bg-gray-50 rounded-lg px-4 py-3 text-xs text-gray-600 space-y-1">
+                  {fetchedMeta.authors && fetchedMeta.authors.length > 0 && (
+                    <p>
+                      <span className="font-medium">Authors: </span>
+                      {fetchedMeta.authors.slice(0, 5).join(', ')}
+                      {fetchedMeta.authors.length > 5 ? ` +${fetchedMeta.authors.length - 5} more` : ''}
+                    </p>
+                  )}
+                  {fetchedMeta.year && (
+                    <p><span className="font-medium">Year: </span>{fetchedMeta.year}</p>
+                  )}
+                  {fetchedMeta.venue && (
+                    <p><span className="font-medium">Venue: </span>{fetchedMeta.venue}</p>
+                  )}
+                  <p className="text-gray-400 pt-0.5">
+                    Source: {fetchedMeta.source === 'semantic_scholar' ? 'Semantic Scholar' : 'OpenAlex'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100">
+              <button
+                onClick={() => setEditingPaper(null)}
+                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSavePaperInfo}
+                disabled={savingPaper}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {savingPaper ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

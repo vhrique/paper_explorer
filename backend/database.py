@@ -147,6 +147,11 @@ def init_db():
                 )
             """)
 
+            # Migrations: add columns that may not exist in older DB instances
+            cur.execute("""
+                ALTER TABLE papers ADD COLUMN IF NOT EXISTS arxiv_id TEXT
+            """)
+
             conn.commit()
             conn.close()
             print("Database initialized.")

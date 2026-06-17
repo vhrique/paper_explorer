@@ -3,7 +3,8 @@ import { api, type Paper, type Passage, type PassageLink, type Project, type Rec
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
-import { ArrowLeft, PanelRight, X, BookOpen, Cpu } from 'lucide-react';
+import { ArrowLeft, PanelRight, Pencil, RefreshCw, X, BookOpen, Cpu } from 'lucide-react';
+import type { PaperMetadataResult } from '../api';
 
 interface Props {
   paper: Paper;
@@ -53,6 +54,17 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   const [allPapersInProject, setAllPapersInProject] = useState<Paper[]>([]);
   const [paperSelectorOpen, setPaperSelectorOpen] = useState(false);
+
+  // Local paper info (title/doi/etc can be edited in place)
+  const [paperInfo, setPaperInfo] = useState<Paper>(paper);
+  const [editingInfo, setEditingInfo] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDoi, setEditDoi] = useState('');
+  const [editArxivId, setEditArxivId] = useState('');
+  const [editAbstract, setEditAbstract] = useState('');
+  const [fetchedMeta, setFetchedMeta] = useState<PaperMetadataResult | null>(null);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [savingInfo, setSavingInfo] = useState(false);
 
   useEffect(() => {
     api.listPassages(paper.id).then(setPassages);
@@ -365,6 +377,46 @@ export function ReaderView({ paper, project, onBack }: Props) {
     }
   };
 
+  const openEditInfo = () => {
+    setEditTitle(paperInfo.title);
+    setEditDoi(paperInfo.doi || '');
+    setEditArxivId(paperInfo.arxiv_id || '');
+    setEditAbstract(paperInfo.abstract || '');
+    setFetchedMeta(null);
+    setEditingInfo(true);
+  };
+
+  const handleFetchMeta = async () => {
+    setFetchingMeta(true);
+    try {
+      const meta = await api.fetchPaperMetadata(paper.id, editDoi || undefined, editArxivId || undefined, editTitle || undefined);
+      setFetchedMeta(meta);
+      if (meta.title) setEditTitle(meta.title);
+      if (meta.doi) setEditDoi(meta.doi);
+      if (meta.abstract) setEditAbstract(meta.abstract);
+    } catch {
+      alert('No metadata found. Try correcting the DOI or arXiv ID.');
+    } finally {
+      setFetchingMeta(false);
+    }
+  };
+
+  const handleSaveInfo = async () => {
+    setSavingInfo(true);
+    try {
+      const updated = await api.updatePaper(paper.id, {
+        title: editTitle || paperInfo.title,
+        doi: editDoi || undefined,
+        arxiv_id: editArxivId || undefined,
+        abstract: editAbstract || undefined,
+      });
+      setPaperInfo(updated);
+      setEditingInfo(false);
+    } finally {
+      setSavingInfo(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       {/* Header */}
@@ -372,9 +424,18 @@ export function ReaderView({ paper, project, onBack }: Props) {
         <button onClick={onBack} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
           <ArrowLeft size={18} className="text-gray-500" />
         </button>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs text-gray-400 truncate">{project.name}</p>
-          <p className="text-sm font-semibold text-gray-800 truncate">{paper.title}</p>
+        <div className="min-w-0 flex-1 group/title flex items-center gap-1.5">
+          <div className="min-w-0">
+            <p className="text-xs text-gray-400 truncate">{project.name}</p>
+            <p className="text-sm font-semibold text-gray-800 truncate">{paperInfo.title}</p>
+          </div>
+          <button
+            onClick={openEditInfo}
+            className="p-1 text-gray-300 hover:text-blue-500 rounded opacity-0 group-hover/title:opacity-100 transition-all flex-shrink-0"
+            title="Edit paper info"
+          >
+            <Pencil size={13} />
+          </button>
         </div>
         {linkingPassage && (
           <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-50 border border-teal-200 rounded-lg">
@@ -608,6 +669,114 @@ export function ReaderView({ paper, project, onBack }: Props) {
                   </button>
                 ))
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Paper info edit modal */}
+      {editingInfo && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setEditingInfo(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h3 className="font-semibold text-gray-900">Paper Info</h3>
+              <button onClick={() => setEditingInfo(false)} className="text-gray-400 hover:text-gray-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-4 overflow-y-auto">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Title</label>
+                <input
+                  value={editTitle}
+                  onChange={e => setEditTitle(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">DOI</label>
+                <div className="flex gap-2">
+                  <input
+                    value={editDoi}
+                    onChange={e => setEditDoi(e.target.value)}
+                    placeholder="10.xxxx/xxxxx"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <button
+                    onClick={handleFetchMeta}
+                    disabled={fetchingMeta}
+                    title="Fetch metadata from Semantic Scholar / OpenAlex"
+                    className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
+                    Fetch
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">arXiv ID</label>
+                <div className="flex gap-2">
+                  <input
+                    value={editArxivId}
+                    onChange={e => setEditArxivId(e.target.value)}
+                    placeholder="2301.07041"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  {!editDoi && (
+                    <button
+                      onClick={handleFetchMeta}
+                      disabled={fetchingMeta}
+                      title="Fetch metadata using arXiv ID"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
+                      Fetch
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Abstract</label>
+                <textarea
+                  value={editAbstract}
+                  onChange={e => setEditAbstract(e.target.value)}
+                  rows={5}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+                />
+              </div>
+
+              {fetchedMeta && (
+                <div className="bg-gray-50 rounded-lg px-4 py-3 text-xs text-gray-600 space-y-1">
+                  {fetchedMeta.authors && fetchedMeta.authors.length > 0 && (
+                    <p>
+                      <span className="font-medium">Authors: </span>
+                      {fetchedMeta.authors.slice(0, 5).join(', ')}
+                      {fetchedMeta.authors.length > 5 ? ` +${fetchedMeta.authors.length - 5} more` : ''}
+                    </p>
+                  )}
+                  {fetchedMeta.year && <p><span className="font-medium">Year: </span>{fetchedMeta.year}</p>}
+                  {fetchedMeta.venue && <p><span className="font-medium">Venue: </span>{fetchedMeta.venue}</p>}
+                  <p className="text-gray-400 pt-0.5">
+                    Source: {fetchedMeta.source === 'semantic_scholar' ? 'Semantic Scholar' : 'OpenAlex'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100">
+              <button onClick={() => setEditingInfo(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveInfo}
+                disabled={savingInfo}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                {savingInfo ? 'Saving…' : 'Save'}
+              </button>
             </div>
           </div>
         </div>

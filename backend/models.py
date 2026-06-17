@@ -21,6 +21,7 @@ class Project(BaseModel):
 class PaperUpdate(BaseModel):
     title: Optional[str] = None
     doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
     abstract: Optional[str] = None
 
 class Paper(BaseModel):
@@ -28,6 +29,7 @@ class Paper(BaseModel):
     title: str
     filename: str
     doi: Optional[str]
+    arxiv_id: Optional[str] = None
     abstract: Optional[str]
     created_at: datetime
     url: Optional[str] = None
@@ -123,6 +125,22 @@ class PassageLinkDetail(BaseModel):
     remote_paper_id: int
     remote_paper_title: str
     created_at: datetime
+
+
+class FetchMetadataRequest(BaseModel):
+    doi: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    title: Optional[str] = None
+
+
+class PaperMetadataResult(BaseModel):
+    title: Optional[str] = None
+    doi: Optional[str] = None
+    abstract: Optional[str] = None
+    authors: Optional[List[str]] = []
+    year: Optional[int] = None
+    venue: Optional[str] = None
+    source: str  # 'semantic_scholar' | 'openalex'
 
 
 class SimilarPassage(BaseModel):

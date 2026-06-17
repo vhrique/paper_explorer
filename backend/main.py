@@ -17,14 +17,15 @@ from database import (
     embedding_to_json, json_to_embedding, init_db, get_db_connection
 )
 from models import (
-    ChunkResult, Note, NoteCreate, NoteUpdate,
-    Paper, PaperUpdate, Passage, PassageCreate, PassageLink, PassageLinkDetail, PassageUpdate,
+    ChunkResult, FetchMetadataRequest, Note, NoteCreate, NoteUpdate,
+    Paper, PaperMetadataResult, PaperUpdate, Passage, PassageCreate, PassageLink, PassageLinkDetail, PassageUpdate,
     Project, ProjectCreate, ProjectUpdate,
     SearchQuery, SearchResponse, SimilarPassage, Tag, TagCreate, TagUpdate,
 )
 from services.embedding import get_embedding_service
 from services.llm_service import get_llm_service
-from services.pdf_processor import extract_chunks, extract_doi
+from services.metadata_service import fetch_paper_metadata
+from services.pdf_processor import extract_arxiv_id, extract_chunks, extract_doi, extract_title_from_pdf
 from services.similarity import find_similar
 from services.similarity_model import train_similarity_model, load_similarity_model
 from services.storage import get_storage
@@ -204,13 +205,14 @@ def get_paper_pdf(paper_id: int):
 
 
 def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
-    title = Path(filename).stem
+    title = extract_title_from_pdf(pdf_bytes) or Path(filename).stem
     doi = extract_doi(pdf_bytes)
+    arxiv_id = extract_arxiv_id(pdf_bytes)
 
     storage.upload(io.BytesIO(pdf_bytes), f"pdfs/temp/{filename}", content_type="application/pdf")
     paper = execute_returning(
-        "INSERT INTO papers (title, filename, doi) VALUES (%s, %s, %s) RETURNING *",
-        (title, filename, doi)
+        "INSERT INTO papers (title, filename, doi, arxiv_id) VALUES (%s, %s, %s, %s) RETURNING *",
+        (title, filename, doi, arxiv_id)
     )
     paper_id = paper["id"]
     storage.upload(io.BytesIO(pdf_bytes), f"pdfs/{paper_id}/{filename}", content_type="application/pdf")
@@ -234,6 +236,26 @@ def _create_paper_from_upload(pdf_bytes: bytes, filename: str) -> dict:
             conn.close()
     except Exception as e:
         print(f"Chunk extraction/embedding failed: {e}")
+
+    # Auto-enrich metadata from external APIs (best-effort)
+    try:
+        meta = fetch_paper_metadata(doi=doi, title=title, arxiv_id=arxiv_id)
+        if meta:
+            fields, params = [], []
+            if meta.get("title"):
+                fields.append("title = %s"); params.append(meta["title"])
+            if meta.get("doi") and not doi:
+                fields.append("doi = %s"); params.append(meta["doi"])
+            if meta.get("abstract"):
+                fields.append("abstract = %s"); params.append(meta["abstract"])
+            if fields:
+                params.append(paper_id)
+                paper = execute_returning(
+                    f"UPDATE papers SET {', '.join(fields)} WHERE id = %s RETURNING *",
+                    tuple(params)
+                )
+    except Exception as e:
+        print(f"Metadata auto-fetch failed: {e}")
 
     return paper
 
@@ -288,6 +310,8 @@ def update_paper(paper_id: int, update: PaperUpdate):
         fields.append("title = %s"); params.append(update.title)
     if update.doi is not None:
         fields.append("doi = %s"); params.append(update.doi)
+    if update.arxiv_id is not None:
+        fields.append("arxiv_id = %s"); params.append(update.arxiv_id)
     if update.abstract is not None:
         fields.append("abstract = %s"); params.append(update.abstract)
     if not fields:
@@ -311,6 +335,23 @@ def delete_paper(paper_id: int):
     except Exception as e:
         print(f"Could not delete PDF from storage: {e}")
     return {"message": "Paper deleted"}
+
+
+@app.post("/papers/{paper_id}/fetch-metadata", response_model=PaperMetadataResult)
+def fetch_metadata(paper_id: int, req: FetchMetadataRequest):
+    row = fetchone("SELECT * FROM papers WHERE id = %s", (paper_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    doi = req.doi if req.doi is not None else row.get("doi")
+    arxiv_id = req.arxiv_id if req.arxiv_id is not None else row.get("arxiv_id")
+    title = req.title if req.title is not None else row.get("title")
+
+    meta = fetch_paper_metadata(doi=doi, title=title, arxiv_id=arxiv_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="No metadata found for this paper")
+
+    return meta
 
 
 # ---------------------------------------------------------------------------

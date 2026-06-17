@@ -43,18 +43,91 @@ def extract_chunks(pdf_bytes: bytes) -> List[Dict[str, Any]]:
     return chunks
 
 
+_BAD_TITLE_WORDS = {"microsoft", "word", "latex", "adobe", "untitled", "document"}
+
+
+def extract_title_from_pdf(pdf_bytes: bytes) -> str | None:
+    """
+    Extract paper title from PDF.
+    Tries PDF metadata first, then falls back to the block with the largest
+    average font size on the first page.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # Try embedded metadata
+    meta_title = (doc.metadata.get("title") or "").strip()
+    if meta_title and 5 < len(meta_title) < 500:
+        lower = meta_title.lower()
+        if not any(w in lower for w in _BAD_TITLE_WORDS):
+            doc.close()
+            return meta_title
+
+    # Heuristic: block with largest average font size on page 0
+    if len(doc) > 0:
+        page = doc[0]
+        best_text: str | None = None
+        best_size = 0.0
+        for block in page.get_text("dict")["blocks"]:
+            if block.get("type") != 0:
+                continue
+            spans = [s for line in block.get("lines", []) for s in line.get("spans", [])]
+            if not spans:
+                continue
+            avg_size = sum(s.get("size", 0) for s in spans) / len(spans)
+            text = " ".join(s.get("text", "").strip() for s in spans).strip()
+            if avg_size > best_size and 5 < len(text) < 300:
+                best_size = avg_size
+                best_text = text
+        if best_text:
+            doc.close()
+            return best_text
+
+    doc.close()
+    return None
+
+
 def extract_doi(pdf_bytes: bytes) -> str | None:
-    """Attempt to extract a DOI from the first two pages of the PDF."""
+    """Attempt to extract a DOI from the first page of the PDF only."""
     import re
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     doi_pattern = re.compile(r'\b10\.\d{4,}/\S+', re.IGNORECASE)
 
-    for page_num in range(min(2, len(doc))):
-        text = doc[page_num].get_text()
+    if len(doc) > 0:
+        text = doc[0].get_text()
         match = doi_pattern.search(text)
         if match:
             doc.close()
             return match.group(0).rstrip('.')
+
+    doc.close()
+    return None
+
+
+def extract_arxiv_id(pdf_bytes: bytes) -> str | None:
+    """
+    Extract an arXiv identifier from the first page of the PDF.
+    Returns the bare ID without version suffix (e.g. '2301.07041'), or None.
+    Handles both new-style (YYMM.NNNNN) and old-style (cat/NNNNNNN) IDs.
+    """
+    import re
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # Matches 'arXiv:2301.07041v2', 'arxiv.org/abs/2301.07041', etc.
+    pattern = re.compile(
+        r'(?:arXiv:|arxiv\.org/abs/)'
+        r'(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7}(?:v\d+)?)',
+        re.IGNORECASE
+    )
+
+    if len(doc) > 0:
+        text = doc[0].get_text()
+        match = pattern.search(text)
+        if match:
+            doc.close()
+            arxiv_id = match.group(1)
+            # Strip version suffix so lookups always get latest metadata
+            arxiv_id = re.sub(r'v\d+$', '', arxiv_id)
+            return arxiv_id
 
     doc.close()
     return None
