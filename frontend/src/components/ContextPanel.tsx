@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, type ChunkResult, type Note, type Passage, type PassageLinkDetail, type Rect, type SearchResponse, type SimilarPassage, type Tag } from '../api';
+import { computeSimilar, preloadProjectEmbeddings } from '../utils/similarity';
 import { Highlighter, Search, Link2, Link, StickyNote, Tag as TagIcon, Trash2, Plus, X } from 'lucide-react';
 
 type Tab = 'passages' | 'similar' | 'search' | 'notes' | 'links';
@@ -42,15 +43,26 @@ export function ContextPanel({
     api.listTags(projectId).then(setTags);
   }, [projectId]);
 
-  // Load similar passages when selected passage changes
+  // Pre-load chunk + passage embeddings for all other project papers in the background
+  useEffect(() => {
+    if (projectId && paperId) preloadProjectEmbeddings(projectId, paperId);
+  }, [projectId, paperId]);
+
+  // Compute similar passages client-side when selected passage changes
   useEffect(() => {
     if (!selectedPassage) { setSimilar([]); return; }
+    // Fetch passage embeddings for this passage from the backend, then compute
     setSimilarLoading(true);
-    api.getSimilarPassages(selectedPassage.id, 10, projectId)
+    api.getPassageEmbeddings(paperId)
+      .then(embs => {
+        const match = embs.find(e => e.id === selectedPassage.id);
+        if (!match) return [];
+        return computeSimilar(match.embedding, projectId, paperId, 10);
+      })
       .then(setSimilar)
       .catch(() => setSimilar([]))
       .finally(() => setSimilarLoading(false));
-  }, [selectedPassage?.id, projectId]);
+  }, [selectedPassage?.id, projectId, paperId]);
 
   // Load notes when selected passage changes
   useEffect(() => {

@@ -98,6 +98,25 @@ export interface ChunkResult {
   rects: Rect[];
 }
 
+export interface ChunkMeta {
+  idx: number;
+  text: string;
+  page: number;
+  granularity: string;
+  parent_idx: number;
+  rects: Rect[];
+}
+
+export interface ChunkMetaResponse {
+  embedding_dim: number;
+  chunks: ChunkMeta[];
+}
+
+export interface PassageEmbedding {
+  id: number;
+  embedding: number[];
+}
+
 export interface SearchResponse {
   answer: string | null;
   chunks: ChunkResult[];
@@ -153,10 +172,15 @@ export const api = {
   updatePassage: (id: number, data: { color?: string }) =>
     axios.patch<Passage>(`${BASE}/passages/${id}`, data).then(r => r.data),
   deletePassage: (id: number) => axios.delete(`${BASE}/passages/${id}`),
-  getSimilarPassages: (id: number, limit = 10, projectId?: number) =>
-    axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit, project_id: projectId } }).then(r => r.data),
-  trainSimilarity: (projectId: number) =>
-    axios.post<{ message: string }>(`${BASE}/projects/${projectId}/train-similarity`).then(r => r.data),
+  // Chunk embeddings (for client-side similarity)
+  getPaperChunks: (paperId: number) =>
+    axios.get<ChunkMetaResponse>(`${BASE}/papers/${paperId}/chunks`).then(r => r.data),
+  getPaperEmbeddingsBin: (paperId: number) =>
+    axios.get(`${BASE}/papers/${paperId}/embeddings.bin`, { responseType: 'arraybuffer' }).then(r => r.data as ArrayBuffer),
+  getPassageEmbeddings: (paperId: number) =>
+    axios.get<PassageEmbedding[]>(`${BASE}/papers/${paperId}/passages/embeddings`).then(r => r.data),
+  embedText: (text: string) =>
+    axios.post<{ embedding: number[] }>(`${BASE}/embed`, { text }).then(r => r.data),
   getPassageLinks: (id: number) =>
     axios.get<PassageLink[]>(`${BASE}/passages/${id}/links`).then(r => r.data),
   getPaperLinks: (paperId: number) =>

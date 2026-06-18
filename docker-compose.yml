@@ -11,7 +11,6 @@ services:
       - ./storage:/app/storage
     environment:
       - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql://user:password@postgres:5432/paper_explorer
       - STORAGE_BACKEND=local
       - LOCAL_STORAGE_PATH=/app/storage
       # Embedding — point to LM Studio or any OpenAI-compatible provider
@@ -22,9 +21,6 @@ services:
       - LLM_BASE_URL=http://host.docker.internal:1234/v1
       - LLM_API_KEY=lm-studio
       - LLM_MODEL=qwen/qwen3-vl-4b
-    depends_on:
-      postgres:
-        condition: service_healthy
     networks:
       - paper-explorer-network
 
@@ -42,28 +38,6 @@ services:
       - backend
     networks:
       - paper-explorer-network
-
-  postgres:
-    image: postgres:16
-    container_name: paper-explorer-postgres
-    environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=paper_explorer
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d paper_explorer"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - paper-explorer-network
-
-volumes:
-  postgres_data:
 
 networks:
   paper-explorer-network:

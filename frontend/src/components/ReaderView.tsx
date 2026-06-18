@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage } from '../api';
+import { computeSimilar } from '../utils/similarity';
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
@@ -108,8 +109,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
   // When selected passage changes while second PDF is open, auto-refresh connections
   useEffect(() => {
     if (!selectedPassage || !connectedSimilar) return;
-    api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
-      const forPaper = results.filter(s => s.paper_id === connectedSimilar.paper_id);
+    const targetPaperId = connectedSimilar.paper_id;
+    api.getPassageEmbeddings(paper.id).then(embs => {
+      const match = embs.find(e => e.id === selectedPassage.id);
+      if (!match) return null;
+      return computeSimilar(match.embedding, project.id, paper.id, 10);
+    }).then(results => {
+      if (!results) return;
+      const forPaper = results.filter(s => s.paper_id === targetPaperId);
       if (forPaper.length > 0) {
         setConnectedSimilar(forPaper[0]);
         setConnectedSimilarList(forPaper);
@@ -278,8 +285,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   const handleFindSimilar = useCallback(async (passage: Passage) => {
     setSelectedPassage(passage);
-    const results = await api.getSimilarPassages(passage.id, 10, project.id);
-    
+    const embs = await api.getPassageEmbeddings(paper.id);
+    const match = embs.find(e => e.id === passage.id);
+    if (!match) {
+      alert("No embedding available for this highlight yet.");
+      return;
+    }
+    const results = await computeSimilar(match.embedding, project.id, paper.id, 10);
+
     // Group by paper
     const paperGroups: { [key: number]: SimilarPassage[] } = {};
     for (const s of results) {
@@ -325,31 +338,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   };
 
   const handleTrainSimilarity = async () => {
-    setTrainingSimilarity(true);
-    try {
-      await api.trainSimilarity(project.id);
-      alert("Similarity model trained successfully!");
-      if (selectedPassage) {
-        api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
-          if (connectedSimilar) {
-            const forPaper = results.filter(s => s.paper_id === connectedSimilar.paper_id);
-            if (forPaper.length > 0) {
-              setConnectedSimilar(forPaper[0]);
-              setConnectedSimilarList(forPaper);
-            } else {
-              setConnectedSimilarList([]);
-              setTargetRects([]);
-              setOffscreenTargetRects([]);
-            }
-          }
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Error training similarity model.");
-    } finally {
-      setTrainingSimilarity(false);
-    }
+    alert("Similarity is now computed client-side — no training needed.");
   };
 
   const handleSelectComparePaper = (targetPaper: Paper) => {
@@ -370,9 +359,13 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setPaperSelectorOpen(false);
 
     if (selectedPassage) {
-      api.getSimilarPassages(selectedPassage.id, 10, project.id).then(results => {
-        const forPaper = results.filter(s => s.paper_id === targetPaper.id);
-        setConnectedSimilarList(forPaper);
+      api.getPassageEmbeddings(paper.id).then(embs => {
+        const match = embs.find(e => e.id === selectedPassage.id);
+        if (!match) return;
+        return computeSimilar(match.embedding, project.id, paper.id, 10);
+      }).then(results => {
+        if (!results) return;
+        setConnectedSimilarList(results.filter(s => s.paper_id === targetPaper.id));
       });
     }
   };
