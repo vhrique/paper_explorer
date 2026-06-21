@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage, type PaperMetadataResult } from '../api';
+import { api, type Note, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage, type PaperMetadataResult } from '../api';
 import * as ws from '../storage/workspace';
 import { computeSimilarAll } from '../utils/similarity';
 import { triggerModelTraining, scheduleModelTraining } from '../services/similarityModel';
@@ -56,6 +56,9 @@ export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
   const [allPapersInProject, setAllPapersInProject] = useState<Paper[]>([]);
   const [paperSelectorOpen, setPaperSelectorOpen] = useState(false);
 
+  const [notesForPaper, setNotesForPaper] = useState<Note[]>([]);
+  const [forceTabNonce, setForceTabNonce] = useState(0);
+
   const [paperInfo, setPaperInfo] = useState<Paper>(paper);
   const [editingInfo, setEditingInfo] = useState(false);
   const [editTitle, setEditTitle] = useState('');
@@ -69,6 +72,7 @@ export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
   useEffect(() => {
     ws.getPassages(paper.id).then(setPassages);
     ws.getPdfBlobUrl(paper.id).then(setPdfUrl).catch(() => {});
+    ws.getNotes(paper.id).then(setNotesForPaper).catch(() => {});
   }, [paper.id]);
 
   useEffect(() => {
@@ -255,6 +259,26 @@ export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
   [connectedSimilarList, sourceRect, selectedPassage]);
 
   const handleSourceRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => setSourceRect(rects[0]?.rect ?? null), []);
+
+  const notesByPassageId = useMemo(() => {
+    const map: Record<number, { id: number; content: string }[]> = {};
+    for (const note of notesForPaper) {
+      for (const pid of note.passage_ids) {
+        (map[pid] ??= []).push({ id: note.id, content: note.content });
+      }
+    }
+    return map;
+  }, [notesForPaper]);
+
+  const handleNotesChanged = useCallback(() => {
+    ws.getNotes(paper.id).then(setNotesForPaper).catch(() => {});
+  }, [paper.id]);
+
+  const handleNoteClick = useCallback((passage: Passage) => {
+    setSelectedPassage(passage);
+    setForceTabNonce(n => n + 1);
+    if (!contextOpen) setContextOpen(true);
+  }, [contextOpen]);
 
   const secondPanelOpen = !!connectedSimilar;
   const handlePassageHover = useCallback((id: number | null) => setHoveredPassageId(id), []);
@@ -479,6 +503,8 @@ export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
               onUnlink={secondPanelOpen ? handleUnlink : undefined}
               onFindSimilar={handleFindSimilar}
               onPassageHover={handlePassageHover}
+              notesByPassageId={notesByPassageId}
+              onNoteClick={handleNoteClick}
             />
           )}
         </div>
@@ -533,6 +559,8 @@ export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
               onOpenLinkedPaper={handleOpenLinkedPaper}
               onLinkDeleted={handleLinkDeletedFromPanel}
               linksVersion={linksVersion}
+              forceTab={forceTabNonce > 0 ? `notes:${forceTabNonce}` : undefined}
+              onNotesChanged={handleNotesChanged}
             />
           </div>
         )}
