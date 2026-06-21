@@ -6,7 +6,8 @@ import { computeSimilarAll, preloadProjectEmbeddings, loadCurrentPaperChunks } f
 import { scheduleModelTraining } from '../services/similarityModel';
 import { EmbeddingNotConfiguredError } from '../services/embeddingService';
 import { hasEmbeddingConfig, hasLLMConfig } from '../services/settingsService';
-import { Highlighter, Search, Link2, Link, StickyNote, Tag as TagIcon, Trash2, Plus, X, Settings } from 'lucide-react';
+import { Highlighter, Search, Link2, Link, StickyNote, Tag as TagIcon, Trash2, Plus, X, Settings, Pencil } from 'lucide-react';
+import type { LinkedNote } from '../storage/workspace';
 
 type Tab = 'passages' | 'similar' | 'search' | 'notes' | 'links';
 
@@ -23,12 +24,14 @@ interface Props {
   onOpenLinkedPaper?: (paperId: number, paperTitle: string, page: number, rects: Rect[]) => void;
   onLinkDeleted?: (linkId: number) => void;
   linksVersion?: number;
+  forceTab?: string;
+  onNotesChanged?: () => void;
 }
 
 export function ContextPanel({
   paperId, paperTitle, projectId, passages, selectedPassage,
   onSelectPassage, onPassageDeleted, onPassageUpdated, onSimilarClick,
-  onOpenLinkedPaper, onLinkDeleted, linksVersion,
+  onOpenLinkedPaper, onLinkDeleted, linksVersion, forceTab, onNotesChanged,
 }: Props) {
   const [tab, setTab] = useState<Tab>('passages');
   const [tags, setTags] = useState<Tag[]>([]);
@@ -38,12 +41,23 @@ export function ContextPanel({
   const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [linkedNotes, setLinkedNotes] = useState<LinkedNote[]>([]);
+  const [linkedNotesLoading, setLinkedNotesLoading] = useState(false);
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const [editNoteContent, setEditNoteContent] = useState('');
   const [newNote, setNewNote] = useState('');
   const [newTagName, setNewTagName] = useState('');
   const [addingTag, setAddingTag] = useState(false);
   const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
   const [links, setLinks] = useState<PassageLinkDetail[]>([]);
   const [linksLoading, setLinksLoading] = useState(false);
+  const [tagPropagationPrompt, setTagPropagationPrompt] = useState<{
+    tag: Tag; linkedPassages: Array<{ passageId: number; paperId: number }>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (forceTab) setTab(forceTab.split(':')[0] as Tab);
+  }, [forceTab]);
 
   useEffect(() => {
     ws.getTags(projectId).then(setTags);
@@ -67,9 +81,14 @@ export function ContextPanel({
   }, [selectedPassage?.id, projectId, paperId]);
 
   useEffect(() => {
-    if (!selectedPassage) { setNotes([]); return; }
-    ws.getPassageNotes(selectedPassage.id, paperId).then(setNotes);
-  }, [selectedPassage?.id, paperId]);
+    if (!selectedPassage) { setNotes([]); setLinkedNotes([]); return; }
+    ws.getPassageNotes(selectedPassage.id, paperId, projectId).then(setNotes);
+    setLinkedNotesLoading(true);
+    ws.getLinkedPassageNotes(selectedPassage.id, paperId, projectId)
+      .then(setLinkedNotes)
+      .catch(() => setLinkedNotes([]))
+      .finally(() => setLinkedNotesLoading(false));
+  }, [selectedPassage?.id, paperId, projectId]);
 
   useEffect(() => {
     if (tab !== 'links') return;
@@ -169,6 +188,43 @@ export function ContextPanel({
   const handleAddTag = async (tag: Tag, passage: Passage) => {
     await ws.addPassageTag(passage.id, tag.id, passage.paper_id);
     onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
+    const links = await ws.getPassageLinksForPassage(passage.id);
+    if (!links.length) return;
+    const resolved = await Promise.all(
+      links.map(async l => {
+        const otherId = l.passage_id_1 === passage.id ? l.passage_id_2 : l.passage_id_1;
+        const otherPaperId = await ws.findPassagePaper(otherId, projectId);
+        return otherPaperId ? { passageId: otherId, paperId: otherPaperId } : null;
+      }),
+    );
+    const valid = resolved.filter((r): r is { passageId: number; paperId: number } => r !== null);
+    if (valid.length > 0) setTagPropagationPrompt({ tag, linkedPassages: valid });
+  };
+
+  const handleApplyTagToLinked = async () => {
+    if (!tagPropagationPrompt) return;
+    await Promise.all(
+      tagPropagationPrompt.linkedPassages.map(({ passageId, paperId }) =>
+        ws.addPassageTag(passageId, tagPropagationPrompt.tag.id, paperId),
+      ),
+    );
+    setTagPropagationPrompt(null);
+  };
+
+  const handleUpdateNote = async (note: Note) => {
+    const updated = await ws.updateNote(note.id, paperId, editNoteContent);
+    setNotes(prev => prev.map(n => n.id === updated.id ? updated : n));
+    setEditingNoteId(null);
+    setEditNoteContent('');
+    onNotesChanged?.();
+  };
+
+  const handleSpreadNote = async (linkedNote: LinkedNote) => {
+    if (!selectedPassage) return;
+    const updated = await ws.addPassageToNote(linkedNote.note.id, linkedNote.sourcePaperId, selectedPassage.id);
+    setNotes(prev => [updated, ...prev]);
+    setLinkedNotes(prev => prev.filter(ln => ln.note.id !== linkedNote.note.id));
+    onNotesChanged?.();
   };
 
   const handleRemoveTag = async (tagId: number, passage: Passage) => {
@@ -193,11 +249,13 @@ export function ContextPanel({
     const note = await ws.createNote(paperId, selectedPassage.id, newNote.trim());
     setNotes(prev => [note, ...prev]);
     setNewNote('');
+    onNotesChanged?.();
   };
 
   const handleDeleteNote = async (id: number) => {
     await ws.deleteNote(id, paperId);
     setNotes(prev => prev.filter(n => n.id !== id));
+    onNotesChanged?.();
   };
 
   const handleDeletePassage = async (id: number) => {
@@ -238,6 +296,18 @@ export function ContextPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
+        {/* Tag propagation banner */}
+        {tagPropagationPrompt && (
+          <div className="mb-3 flex items-center gap-2 px-3 py-2 bg-teal-50 border border-teal-200 rounded-xl text-xs">
+            <span className="text-teal-700 flex-1">
+              Apply tag <strong>"{tagPropagationPrompt.tag.name}"</strong> to {tagPropagationPrompt.linkedPassages.length} linked highlight{tagPropagationPrompt.linkedPassages.length > 1 ? 's' : ''}?
+            </span>
+            <button onClick={handleApplyTagToLinked}
+              className="px-2 py-1 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-colors">Apply</button>
+            <button onClick={() => setTagPropagationPrompt(null)}
+              className="p-1 text-teal-400 hover:text-teal-700 transition-colors"><X size={12} /></button>
+          </div>
+        )}
 
         {/* HIGHLIGHTS TAB */}
         {tab === 'passages' && (
@@ -482,13 +552,56 @@ export function ContextPanel({
                 <div className="space-y-2">
                   {notes.map(note => (
                     <div key={note.id} className="p-3 bg-yellow-50 border border-yellow-200 rounded-xl group relative">
-                      <p className="text-xs text-gray-700 whitespace-pre-wrap">{note.content}</p>
-                      <button onClick={() => handleDeleteNote(note.id)}
-                        className="absolute top-2 right-2 p-1 text-gray-300 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all">
-                        <Trash2 size={12} />
-                      </button>
+                      {editingNoteId === note.id ? (
+                        <div className="space-y-2">
+                          <textarea autoFocus value={editNoteContent} onChange={e => setEditNoteContent(e.target.value)}
+                            rows={4}
+                            className="w-full px-2 py-1.5 text-xs border border-yellow-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-400 resize-none bg-white" />
+                          <div className="flex gap-1.5">
+                            <button onClick={() => handleUpdateNote(note)}
+                              className="px-3 py-1 bg-yellow-400 text-yellow-900 text-xs rounded-lg hover:bg-yellow-500 transition-colors">Save</button>
+                            <button onClick={() => { setEditingNoteId(null); setEditNoteContent(''); }}
+                              className="px-3 py-1 text-xs text-gray-500 hover:text-gray-700 transition-colors">Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-700 whitespace-pre-wrap pr-12">{note.content}</p>
+                      )}
+                      {editingNoteId !== note.id && (
+                        <div className="absolute top-2 right-2 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-all">
+                          <button onClick={() => { setEditingNoteId(note.id); setEditNoteContent(note.content); }}
+                            className="p-1 text-gray-300 hover:text-blue-400">
+                            <Pencil size={12} />
+                          </button>
+                          <button onClick={() => handleDeleteNote(note.id)}
+                            className="p-1 text-gray-300 hover:text-red-400">
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
+
+                  {/* Notes from linked highlights */}
+                  {(linkedNotesLoading || linkedNotes.length > 0) && (
+                    <div className="pt-1">
+                      <p className="text-xs text-gray-400 font-medium mb-2 flex items-center gap-1">
+                        <Link2 size={11} /> From linked highlights
+                      </p>
+                      {linkedNotesLoading && <p className="text-xs text-gray-400 animate-pulse">Loading…</p>}
+                      {linkedNotes.map(ln => (
+                        <div key={ln.note.id} className="p-3 bg-gray-50 border border-gray-200 rounded-xl mb-2">
+                          <p className="text-xs font-medium text-gray-500 truncate mb-1">{ln.sourcePaperTitle}</p>
+                          <p className="text-xs text-gray-700 whitespace-pre-wrap">{ln.note.content}</p>
+                          <button onClick={() => handleSpreadNote(ln)}
+                            className="mt-2 text-xs text-teal-600 hover:text-teal-800 transition-colors">
+                            Include here →
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="flex gap-2">
                     <textarea value={newNote} onChange={e => setNewNote(e.target.value)}
                       placeholder="Add a note…" rows={3}

@@ -11,6 +11,7 @@ import { getEmbeddingModelId, hasEmbeddingConfig, type AppSettings } from '../se
 let _adapter: StorageAdapter | null = null;
 let _ws: WorkspaceData | null = null;
 const _blobUrlCache = new Map<number, string>();
+const _passagePaperCache = new Map<number, number>(); // passageId → paperId
 
 const EMPTY_WS: WorkspaceData = {
   _next_id: 1,
@@ -28,6 +29,7 @@ export function setAdapter(adapter: StorageAdapter): void {
   _adapter = adapter;
   _ws = null;
   _blobUrlCache.clear();
+  _passagePaperCache.clear();
 }
 
 export function isStorageConnected(): boolean {
@@ -409,9 +411,33 @@ function hydrateNote(sn: StoredNote): Note {
   };
 }
 
-export async function getPassageNotes(passageId: number, paperId: number): Promise<Note[]> {
+export async function getNotes(paperId: number): Promise<Note[]> {
   const ann = await loadAnnotations(paperId);
-  return ann.notes.filter(n => n.passage_ids.includes(passageId)).map(hydrateNote);
+  return ann.notes.map(hydrateNote);
+}
+
+export async function getPassageNotes(passageId: number, paperId: number, projectId?: number): Promise<Note[]> {
+  const own = await loadAnnotations(paperId);
+  const ownNotes = own.notes.filter(n => n.passage_ids.includes(passageId)).map(hydrateNote);
+
+  if (projectId == null) return ownNotes;
+
+  // Also collect notes from other project papers that reference this passageId
+  // (notes spread via addPassageToNote live in the source paper's file)
+  const workspace = await ws();
+  const otherPaperIds = workspace.paper_ids.filter(id => id !== paperId);
+  const seen = new Set(ownNotes.map(n => n.id));
+  const extra: Note[] = [];
+  await Promise.all(otherPaperIds.map(async (pid) => {
+    const ann = await loadAnnotations(pid);
+    for (const sn of ann.notes) {
+      if (!seen.has(sn.id) && sn.passage_ids.includes(passageId)) {
+        seen.add(sn.id);
+        extra.push(hydrateNote(sn));
+      }
+    }
+  }));
+  return [...ownNotes, ...extra];
 }
 
 export async function createNote(paperId: number, passageId: number, content: string): Promise<Note> {
@@ -435,6 +461,89 @@ export async function deleteNote(noteId: number, paperId: number): Promise<void>
   const ann = await loadAnnotations(paperId);
   ann.notes = ann.notes.filter(n => n.id !== noteId);
   await saveAnnotations(paperId, ann);
+}
+
+export async function updateNote(noteId: number, paperId: number, content: string): Promise<Note> {
+  const ann = await loadAnnotations(paperId);
+  const sn = ann.notes.find(n => n.id === noteId);
+  if (!sn) throw new Error(`Note ${noteId} not found`);
+  sn.content = content.trim();
+  sn.updated_at = now();
+  await saveAnnotations(paperId, ann);
+  return hydrateNote(sn);
+}
+
+export async function addPassageToNote(noteId: number, sourcePaperId: number, extraPassageId: number): Promise<Note> {
+  const ann = await loadAnnotations(sourcePaperId);
+  const sn = ann.notes.find(n => n.id === noteId);
+  if (!sn) throw new Error(`Note ${noteId} not found`);
+  if (!sn.passage_ids.includes(extraPassageId)) {
+    sn.passage_ids.push(extraPassageId);
+    sn.updated_at = now();
+    await saveAnnotations(sourcePaperId, ann);
+  }
+  return hydrateNote(sn);
+}
+
+/** Find which paper (within the project) owns a given passage ID. Caches per session. */
+export async function findPassagePaper(passageId: number, projectId: number): Promise<number | null> {
+  if (_passagePaperCache.has(passageId)) return _passagePaperCache.get(passageId)!;
+  const papers = await getProjectPapers(projectId);
+  for (const paper of papers) {
+    const ann = await loadAnnotations(paper.id);
+    // Warm the full paper's mapping opportunistically
+    for (const p of ann.passages) _passagePaperCache.set(p.id, paper.id);
+    if (_passagePaperCache.has(passageId)) return paper.id;
+  }
+  return null;
+}
+
+export interface LinkedNote {
+  note: Note;
+  sourcePaperId: number;
+  sourcePassageId: number;
+  sourcePaperTitle: string;
+}
+
+/** Notes that belong to passages linked to the given passage, excluding already-own notes. */
+export async function getLinkedPassageNotes(
+  passageId: number,
+  paperId: number,
+  projectId: number,
+): Promise<LinkedNote[]> {
+  const workspace = await ws();
+  const links = workspace.passage_links.filter(
+    l => l.passage_id_1 === passageId || l.passage_id_2 === passageId,
+  );
+  if (!links.length) return [];
+
+  // Own note IDs to exclude from linked results
+  const ownAnn = await loadAnnotations(paperId);
+  const ownNoteIds = new Set(ownAnn.notes.filter(n => n.passage_ids.includes(passageId)).map(n => n.id));
+
+  const seen = new Set<number>();
+  const results: LinkedNote[] = [];
+
+  await Promise.all(links.map(async (link) => {
+    const otherPassageId = link.passage_id_1 === passageId ? link.passage_id_2 : link.passage_id_1;
+    const otherPaperId = await findPassagePaper(otherPassageId, projectId);
+    if (!otherPaperId) return;
+    const [ann, meta] = await Promise.all([loadAnnotations(otherPaperId), loadPaperMeta(otherPaperId)]);
+    if (!meta) return;
+    for (const sn of ann.notes) {
+      if (!sn.passage_ids.includes(otherPassageId)) continue;
+      if (seen.has(sn.id) || ownNoteIds.has(sn.id)) continue;
+      seen.add(sn.id);
+      results.push({
+        note: hydrateNote(sn),
+        sourcePaperId: otherPaperId,
+        sourcePassageId: otherPassageId,
+        sourcePaperTitle: meta.title,
+      });
+    }
+  }));
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------
