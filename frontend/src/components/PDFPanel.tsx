@@ -3,6 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import { api, type Passage, type Rect, type Tag } from '../api';
+import * as ws from '../storage/workspace';
 import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink, Sparkles } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -29,6 +30,7 @@ interface ConnectedPassage {
 
 interface Props {
   paperId: number;
+  pdfUrl: string;
   projectId: number;
   passages: Passage[];
   selectedPassage: Passage | null;
@@ -52,7 +54,7 @@ interface Props {
   onPassageHover?: (passageId: number | null) => void;
 }
 
-export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover }: Props) {
+export function PDFPanel({ paperId, pdfUrl, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
@@ -169,10 +171,8 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   }, [linkedPassages, scale, numPages, onLinkedRectsChange]);
 
   useEffect(() => {
-    api.listTags(projectId).then(setTags);
+    ws.getTags(projectId).then(setTags);
   }, [projectId]);
-
-  const pdfUrl = api.getPaperPdfUrl(paperId);
 
   useEffect(() => {
     if (jumpToPage == null) return;
@@ -257,7 +257,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
 
   const handleCreatePassage = async () => {
     if (!pending) return;
-    const passage = await api.createPassage(paperId, {
+    const passage = await ws.createPassage(paperId, {
       page: pending.page,
       text: pending.text,
       rects: pending.rects,
@@ -266,6 +266,10 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
     onPassageCreated(passage);
     setPending(null);
     window.getSelection()?.removeAllRanges();
+    // Embed in background so it's available for future similarity search
+    api.embedText(pending.text).then(({ embedding }) =>
+      ws.updatePassageEmbedding(passage.id, paperId, embedding)
+    ).catch(() => {});
   };
 
   const handlePageMouseMove = (e: React.MouseEvent<HTMLDivElement>, pageIndex: number) => {
@@ -298,19 +302,21 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   };
 
   const handleDeletePassage = async (id: number) => {
-    await api.deletePassage(id);
+    const passage = passages.find(p => p.id === id);
+    if (!passage) return;
+    await ws.deletePassage(id, paperId);
     onPassageDeleted(id);
     setTaggingPassageId(null);
   };
 
   const handleAddTag = async (tag: Tag, passage: Passage) => {
-    await api.addPassageTag(passage.id, tag.id);
+    await ws.addPassageTag(passage.id, tag.id, passage.paper_id);
     onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
     setTaggingPassageId(null);
   };
 
   const handleRemoveTag = async (tagId: number, passage: Passage) => {
-    await api.removePassageTag(passage.id, tagId);
+    await ws.removePassageTag(passage.id, tagId, passage.paper_id);
     onPassageUpdated({ ...passage, tags: passage.tags.filter(t => t.id !== tagId) });
     const stillUsed = passages.some(p => p.id !== passage.id && p.tags.some(t => t.id === tagId));
     if (!stillUsed) setTags(prev => prev.filter(t => t.id !== tagId));
@@ -318,7 +324,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
 
   const handleCreateTag = async (passage: Passage) => {
     if (!newTagName.trim()) return;
-    const tag = await api.createTag(newTagName.trim(), 'content', projectId);
+    const tag = await ws.createTag(newTagName.trim(), 'content', projectId);
     setTags(prev => [...prev, tag]);
     setNewTagName('');
     setAddingTag(false);

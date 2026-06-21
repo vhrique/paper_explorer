@@ -1,28 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage } from '../api';
-import { computeSimilar } from '../utils/similarity';
+import { api, type Paper, type Passage, type PassageLink, type Project, type Rect, type SimilarPassage, type PaperMetadataResult } from '../api';
+import * as ws from '../storage/workspace';
+import { computeSimilarAll } from '../utils/similarity';
+import { triggerModelTraining, scheduleModelTraining } from '../services/similarityModel';
 import { PDFPanel } from './PDFPanel';
 import { ContextPanel } from './ContextPanel';
 import { ConnectionOverlay } from './ConnectionOverlay';
-import { ArrowLeft, PanelRight, Pencil, RefreshCw, X, BookOpen, Cpu } from 'lucide-react';
-import type { PaperMetadataResult } from '../api';
+import { ArrowLeft, PanelRight, Pencil, RefreshCw, X, BookOpen, Cpu, Settings } from 'lucide-react';
 
 interface Props {
   paper: Paper;
   project: Project;
   onBack: () => void;
+  onOpenSettings?: () => void;
 }
 
-export function ReaderView({ paper, project, onBack }: Props) {
+export function ReaderView({ paper, project, onBack, onOpenSettings }: Props) {
   const [passages, setPassages] = useState<Passage[]>([]);
   const [selectedPassage, setSelectedPassage] = useState<Passage | null>(null);
   const [jumpToPage, setJumpToPage] = useState<number | undefined>();
   const [contextOpen, setContextOpen] = useState(true);
+  const [pdfUrl, setPdfUrl] = useState<string>('');
+  const [secondPdfUrl, setSecondPdfUrl] = useState<string>('');
 
   // Second panel state
   const [connectedSimilar, setConnectedSimilar] = useState<SimilarPassage | null>(null);
   const [connectedSimilarList, setConnectedSimilarList] = useState<SimilarPassage[]>([]);
   const [trainingSimilarity, setTrainingSimilarity] = useState(false);
+  const [trainingStatus, setTrainingStatus] = useState<string | null>(null);
   const [secondPassages, setSecondPassages] = useState<Passage[]>([]);
   const [secondSelectedPassage, setSecondSelectedPassage] = useState<Passage | null>(null);
   const [secondJumpToPassage, setSecondJumpToPassage] = useState<{ page: number; rect: Rect } | undefined>();
@@ -45,18 +50,12 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [hoveredPassageId, setHoveredPassageId] = useState<number | null>(null);
   const [similaritySelector, setSimilaritySelector] = useState<{
     passage: Passage;
-    papers: {
-      paperId: number;
-      title: string;
-      maxSimilarity: number;
-      matches: SimilarPassage[];
-    }[];
+    papers: { paperId: number; title: string; maxSimilarity: number; matches: SimilarPassage[] }[];
   } | null>(null);
 
   const [allPapersInProject, setAllPapersInProject] = useState<Paper[]>([]);
   const [paperSelectorOpen, setPaperSelectorOpen] = useState(false);
 
-  // Local paper info (title/doi/etc can be edited in place)
   const [paperInfo, setPaperInfo] = useState<Paper>(paper);
   const [editingInfo, setEditingInfo] = useState(false);
   const [editTitle, setEditTitle] = useState('');
@@ -68,22 +67,21 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const [savingInfo, setSavingInfo] = useState(false);
 
   useEffect(() => {
-    api.listPassages(paper.id).then(setPassages);
+    ws.getPassages(paper.id).then(setPassages);
+    ws.getPdfBlobUrl(paper.id).then(setPdfUrl).catch(() => {});
   }, [paper.id]);
 
   useEffect(() => {
-    if (!connectedSimilar) { setSecondPassages([]); return; }
-    api.listPassages(connectedSimilar.paper_id).then(setSecondPassages);
-  }, [connectedSimilar]);
+    if (!connectedSimilar) { setSecondPassages([]); setSecondPdfUrl(''); return; }
+    ws.getPassages(connectedSimilar.paper_id).then(setSecondPassages);
+    ws.getPdfBlobUrl(connectedSimilar.paper_id).then(setSecondPdfUrl).catch(() => {});
+  }, [connectedSimilar?.paper_id]);
 
-  // Load passage links when both panels are open
   useEffect(() => {
     if (!connectedSimilar || passages.length === 0) { setPassageLinks([]); return; }
-    Promise.all(passages.map(p => api.getPassageLinks(p.id)))
-      .then(results => setPassageLinks(results.flat()));
+    ws.getPassageLinks(paper.id).then(setPassageLinks);
   }, [connectedSimilar, passages]);
 
-  // Mouse tracking + Escape key for linking mode
   useEffect(() => {
     if (!linkingPassage) { setMousePos(null); return; }
     const onMove = (e: MouseEvent) => setMousePos({ x: e.clientX, y: e.clientY });
@@ -106,16 +104,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setTimeout(() => setJumpToPage(undefined), 100);
   };
 
-  // When selected passage changes while second PDF is open, auto-refresh connections
+  // When selected passage changes while second PDF is open, auto-refresh similarity connections
   useEffect(() => {
     if (!selectedPassage || !connectedSimilar) return;
     const targetPaperId = connectedSimilar.paper_id;
-    api.getPassageEmbeddings(paper.id).then(embs => {
+    ws.getPassageEmbeddings(paper.id).then(embs => {
       const match = embs.find(e => e.id === selectedPassage.id);
-      if (!match) return null;
-      return computeSimilar(match.embedding, project.id, paper.id, 10);
+      return computeSimilarAll(match?.embedding ?? null, selectedPassage.text, project.id, paper.id, 10);
     }).then(results => {
-      if (!results) return;
       const forPaper = results.filter(s => s.paper_id === targetPaperId);
       if (forPaper.length > 0) {
         setConnectedSimilar(forPaper[0]);
@@ -125,7 +121,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
         setTargetRects([]);
         setOffscreenTargetRects([]);
       }
-    });
+    }).catch(() => {});
   }, [selectedPassage?.id]);
 
   const handlePassageDeleted = (id: number) => {
@@ -163,9 +159,9 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setPassageLinks([]);
     setLinkingPassage(null);
     setLinkingRect(null);
+    setSecondPdfUrl('');
   };
 
-  // Linking handlers
   const handleLinkStart = useCallback((passage: Passage, rect: DOMRect | null, panel: 'first' | 'second') => {
     setLinkingPassage({ passage, panel });
     setLinkingRect(rect);
@@ -173,24 +169,18 @@ export function ReaderView({ paper, project, onBack }: Props) {
 
   const handleLinkTarget = useCallback(async (targetPassage: Passage) => {
     if (!linkingPassage) return;
-    const link = await api.createPassageLink(linkingPassage.passage.id, targetPassage.id);
+    const link = await ws.createPassageLink(linkingPassage.passage.id, targetPassage.id);
     setPassageLinks(prev => [...prev, link]);
     setLinksVersion(v => v + 1);
     setLinkingPassage(null);
     setLinkingRect(null);
-  }, [linkingPassage]);
+    scheduleModelTraining(project.id);
+  }, [linkingPassage, project.id]);
 
   const handleOpenLinkedPaper = (remotePaperId: number, remotePaperTitle: string, remotePage: number, remoteRects: Rect[]) => {
     const synthetic: SimilarPassage = {
-      passage_id: 0,
-      paper_id: remotePaperId,
-      paper_title: remotePaperTitle,
-      page: remotePage,
-      text: '',
-      similarity: 1,
-      rects: remoteRects,
-      tags: [],
-      source: 'passage',
+      passage_id: 0, paper_id: remotePaperId, paper_title: remotePaperTitle,
+      page: remotePage, text: '', similarity: 1, rects: remoteRects, tags: [], source: 'passage',
     };
     handleSimilarClick(synthetic, []);
   };
@@ -208,11 +198,11 @@ export function ReaderView({ paper, project, onBack }: Props) {
       (l.passage_id_2 === passageId && (secondIds.has(l.passage_id_1) || firstIds.has(l.passage_id_1)))
     );
     if (!link) return;
-    await api.deletePassageLink(link.passage_id_1, link.passage_id_2);
+    await ws.deletePassageLink(link.passage_id_1, link.passage_id_2);
     setPassageLinks(prev => prev.filter(l => l.id !== link.id));
-  }, [passageLinks, passages, secondPassages]);
+    scheduleModelTraining(project.id);
+  }, [passageLinks, passages, secondPassages, project.id]);
 
-  // Derive linked passages for each panel
   const secondPassageIds = useMemo(() => new Set(secondPassages.map(p => p.id)), [secondPassages]);
   const firstPassageIds = useMemo(() => new Set(passages.map(p => p.id)), [passages]);
 
@@ -234,7 +224,6 @@ export function ReaderView({ paper, project, onBack }: Props) {
       .map(p => ({ page: p.page, rects: p.rects, passageId: p.id })),
   [secondPassages, passageLinks, firstPassageIds]);
 
-  // Pair linked rects from both panels into source→target pairs for the overlay
   const linkRects = useMemo(() => {
     const firstMap = new Map(firstLinkedRects.map(r => [r.passageId, r.rect]));
     const secondMap = new Map(secondLinkedRects.map(r => [r.passageId, r.rect]));
@@ -245,22 +234,14 @@ export function ReaderView({ paper, project, onBack }: Props) {
       const targetId = sourceId === link.passage_id_1 ? link.passage_id_2 : link.passage_id_1;
       const src = firstMap.get(sourceId);
       const tgt = secondMap.get(targetId);
-      if (src && tgt) {
-        result.push({ source: src, target: tgt, sourceId, targetId });
-      }
+      if (src && tgt) result.push({ source: src, target: tgt, sourceId, targetId });
     }
     return result;
   }, [passageLinks, firstLinkedRects, secondLinkedRects, passages]);
 
-  const handleFirstLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
-    setFirstLinkedRects(rects);
-  }, []);
+  const handleFirstLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => setFirstLinkedRects(rects), []);
+  const handleSecondLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => setSecondLinkedRects(rects), []);
 
-  const handleSecondLinkedRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
-    setSecondLinkedRects(rects);
-  }, []);
-
-  // Stable arrays for similarity connection lines
   const sourceConnectedPassages = useMemo(() =>
     selectedPassage && connectedSimilar
       ? [{ page: selectedPassage.page, rects: selectedPassage.rects, highlight: false, passageId: selectedPassage.id }]
@@ -273,49 +254,30 @@ export function ReaderView({ paper, project, onBack }: Props) {
       : [],
   [connectedSimilarList, sourceRect, selectedPassage]);
 
-  const handleSourceRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => {
-    setSourceRect(rects[0]?.rect ?? null);
-  }, []);
+  const handleSourceRectsChange = useCallback((rects: { passageId: number; rect: DOMRect }[]) => setSourceRect(rects[0]?.rect ?? null), []);
 
   const secondPanelOpen = !!connectedSimilar;
-
-  const handlePassageHover = useCallback((id: number | null) => {
-    setHoveredPassageId(id);
-  }, []);
+  const handlePassageHover = useCallback((id: number | null) => setHoveredPassageId(id), []);
 
   const handleFindSimilar = useCallback(async (passage: Passage) => {
     setSelectedPassage(passage);
-    const embs = await api.getPassageEmbeddings(paper.id);
+    const embs = await ws.getPassageEmbeddings(paper.id);
     const match = embs.find(e => e.id === passage.id);
-    if (!match) {
-      alert("No embedding available for this highlight yet.");
-      return;
-    }
-    const results = await computeSimilar(match.embedding, project.id, paper.id, 10);
+    const results = await computeSimilarAll(match?.embedding ?? null, passage.text, project.id, paper.id, 10);
 
-    // Group by paper
-    const paperGroups: { [key: number]: SimilarPassage[] } = {};
-    for (const s of results) {
-      (paperGroups[s.paper_id] ??= []).push(s);
-    }
+    const paperGroups: Record<number, SimilarPassage[]> = {};
+    for (const s of results) (paperGroups[s.paper_id] ??= []).push(s);
 
     const papersList = Object.keys(paperGroups).map(key => {
       const id = parseInt(key);
       const matches = paperGroups[id];
-      const maxSim = Math.max(...matches.map(m => m.similarity));
-      return {
-        paperId: id,
-        title: matches[0].paper_title,
-        maxSimilarity: maxSim,
-        matches: matches
-      };
+      return { paperId: id, title: matches[0].paper_title, maxSimilarity: Math.max(...matches.map(m => m.similarity)), matches };
     }).sort((a, b) => b.maxSimilarity - a.maxSimilarity);
 
     if (papersList.length === 0) {
-      alert("No similar passages found in other papers of this project.");
+      alert('No similar passages found in other papers of this project.');
       return;
     }
-
     setSimilaritySelector({ passage, papers: papersList });
   }, []);
 
@@ -331,27 +293,34 @@ export function ReaderView({ paper, project, onBack }: Props) {
   };
 
   const handleOpenPaperSelector = async () => {
-    const list = await api.listPapers(project.id);
-    const otherPapers = list.filter(p => p.id !== paper.id);
-    setAllPapersInProject(otherPapers);
+    const list = await ws.getProjectPapers(project.id);
+    setAllPapersInProject(list.filter(p => p.id !== paper.id));
     setPaperSelectorOpen(true);
   };
 
   const handleTrainSimilarity = async () => {
-    alert("Similarity is now computed client-side — no training needed.");
+    setTrainingSimilarity(true);
+    setTrainingStatus(null);
+    try {
+      const result = await triggerModelTraining(project.id);
+      const messages: Record<string, string> = {
+        'trained':          'Model trained.',
+        'cleared':          'No links — model cleared.',
+        'no-links':         'No passage links found. Link passages across papers first.',
+        'no-embeddings':    'Passages have no embeddings. Configure the embedding API and reprocess.',
+        'already-running':  'Training already in progress.',
+        'error':            'Training failed — check the console.',
+      };
+      setTrainingStatus(messages[result] ?? result);
+    } finally {
+      setTrainingSimilarity(false);
+    }
   };
 
   const handleSelectComparePaper = (targetPaper: Paper) => {
     const synthetic: SimilarPassage = {
-      passage_id: 0,
-      paper_id: targetPaper.id,
-      paper_title: targetPaper.title,
-      page: 0,
-      text: '',
-      similarity: 1,
-      rects: [],
-      tags: [],
-      source: 'passage',
+      passage_id: 0, paper_id: targetPaper.id, paper_title: targetPaper.title,
+      page: 0, text: '', similarity: 1, rects: [], tags: [], source: 'passage',
     };
     setConnectedSimilar(synthetic);
     setConnectedSimilarList([]);
@@ -359,14 +328,12 @@ export function ReaderView({ paper, project, onBack }: Props) {
     setPaperSelectorOpen(false);
 
     if (selectedPassage) {
-      api.getPassageEmbeddings(paper.id).then(embs => {
+      ws.getPassageEmbeddings(paper.id).then(embs => {
         const match = embs.find(e => e.id === selectedPassage.id);
-        if (!match) return;
-        return computeSimilar(match.embedding, project.id, paper.id, 10);
+        return computeSimilarAll(match?.embedding ?? null, selectedPassage.text, project.id, paper.id, 10);
       }).then(results => {
-        if (!results) return;
         setConnectedSimilarList(results.filter(s => s.paper_id === targetPaper.id));
-      });
+      }).catch(() => {});
     }
   };
 
@@ -382,7 +349,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const handleFetchMeta = async () => {
     setFetchingMeta(true);
     try {
-      const meta = await api.fetchPaperMetadata(paper.id, editDoi || undefined, editArxivId || undefined, editTitle || undefined);
+      const meta = await api.fetchMetadata(editDoi || undefined, editArxivId || undefined, editTitle || undefined);
       setFetchedMeta(meta);
       if (meta.title) setEditTitle(meta.title);
       if (meta.doi) setEditDoi(meta.doi);
@@ -397,7 +364,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
   const handleSaveInfo = async () => {
     setSavingInfo(true);
     try {
-      const updated = await api.updatePaper(paper.id, {
+      const updated = await ws.updatePaperMetadata(paper.id, {
         title: editTitle || paperInfo.title,
         doi: editDoi || undefined,
         arxiv_id: editArxivId || undefined,
@@ -422,11 +389,8 @@ export function ReaderView({ paper, project, onBack }: Props) {
             <p className="text-xs text-gray-400 truncate">{project.name}</p>
             <p className="text-sm font-semibold text-gray-800 truncate">{paperInfo.title}</p>
           </div>
-          <button
-            onClick={openEditInfo}
-            className="p-1 text-gray-300 hover:text-blue-500 rounded opacity-0 group-hover/title:opacity-100 transition-all flex-shrink-0"
-            title="Edit paper info"
-          >
+          <button onClick={openEditInfo}
+            className="p-1 text-gray-300 hover:text-blue-500 rounded opacity-0 group-hover/title:opacity-100 transition-all flex-shrink-0">
             <Pencil size={13} />
           </button>
         </div>
@@ -444,94 +408,82 @@ export function ReaderView({ paper, project, onBack }: Props) {
             <div className="w-2 h-2 rounded-full bg-purple-500 flex-shrink-0" />
             <p className="text-xs text-purple-700 truncate">
               {connectedSimilar.paper_title}
-              {connectedSimilarList.length > 1 && (
-                <span className="ml-1 text-purple-400">· {connectedSimilarList.length} matches</span>
-              )}
+              {connectedSimilarList.length > 1 && <span className="ml-1 text-purple-400">· {connectedSimilarList.length} matches</span>}
             </p>
             <button onClick={handleCloseSecond} className="p-0.5 text-purple-400 hover:text-purple-600 flex-shrink-0">
               <X size={13} />
             </button>
           </div>
         )}
-        {/* Toggle controls */}
         <div className="flex items-center gap-4 border-r border-gray-200 pr-3 mr-1">
           <label className="flex items-center gap-1.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showSimilarityLines}
-              onChange={e => setShowSimilarityLines(e.target.checked)}
-              className="w-3.5 h-3.5 rounded text-purple-600 focus:ring-purple-400 border-gray-300"
-            />
+            <input type="checkbox" checked={showSimilarityLines} onChange={e => setShowSimilarityLines(e.target.checked)}
+              className="w-3.5 h-3.5 rounded text-purple-600 focus:ring-purple-400 border-gray-300" />
             <span className="text-xs font-medium text-gray-600">Similarities</span>
           </label>
           <label className="flex items-center gap-1.5 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showManualLinks}
-              onChange={e => setShowManualLinks(e.target.checked)}
-              className="w-3.5 h-3.5 rounded text-teal-600 focus:ring-teal-400 border-gray-300"
-            />
+            <input type="checkbox" checked={showManualLinks} onChange={e => setShowManualLinks(e.target.checked)}
+              className="w-3.5 h-3.5 rounded text-teal-600 focus:ring-teal-400 border-gray-300" />
             <span className="text-xs font-medium text-gray-600">Manual Links</span>
           </label>
         </div>
-        <button
-          onClick={handleTrainSimilarity}
-          disabled={trainingSimilarity}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border rounded-lg transition-colors mr-2 ${
-            trainingSimilarity
-              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-              : 'border-teal-200 text-teal-600 bg-teal-50 hover:bg-teal-100 hover:text-teal-700'
-          }`}
-          title="Train a neural network projection model on manual links"
-        >
-          <Cpu size={14} className={trainingSimilarity ? "animate-spin" : ""} />
-          <span>{trainingSimilarity ? 'Training...' : 'Train Model'}</span>
-        </button>
-        <button
-          onClick={handleOpenPaperSelector}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:bg-gray-50 hover:text-blue-600 transition-colors mr-2 text-gray-600"
-          title="Compare with another paper"
-        >
+        <div className="flex items-center gap-2 mr-2">
+          <button onClick={handleTrainSimilarity} disabled={trainingSimilarity}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border rounded-lg transition-colors border-teal-200 text-teal-600 bg-teal-50 hover:bg-teal-100 hover:text-teal-700 disabled:opacity-50"
+            title="Train similarity model on manual passage links">
+            <Cpu size={14} className={trainingSimilarity ? 'animate-spin' : ''} />
+            <span>{trainingSimilarity ? 'Training…' : 'Train Model'}</span>
+          </button>
+          {trainingStatus && (
+            <span className="text-xs text-gray-500 max-w-xs truncate" title={trainingStatus}>
+              {trainingStatus}
+            </span>
+          )}
+        </div>
+        <button onClick={handleOpenPaperSelector}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 rounded-lg hover:bg-gray-50 hover:text-blue-600 transition-colors mr-2 text-gray-600">
           <BookOpen size={14} />
           <span>Compare Paper</span>
         </button>
-        <button
-          onClick={() => setContextOpen(o => !o)}
-          className={`p-1.5 rounded-lg transition-colors ${contextOpen ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-400'}`}
-        >
+        <button onClick={() => setContextOpen(o => !o)}
+          className={`p-1.5 rounded-lg transition-colors ${contextOpen ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100 text-gray-400'}`}>
           <PanelRight size={18} />
+        </button>
+        <button onClick={onOpenSettings} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors" title="Settings">
+          <Settings size={16} className="text-gray-400" />
         </button>
       </header>
 
       {/* Main */}
       <div className="flex flex-1 min-h-0">
-        {/* First PDF */}
         <div className={`flex-1 min-w-0 ${connectedSimilar ? 'border-r border-gray-300' : ''}`}>
-          <PDFPanel
-            paperId={paper.id}
-            projectId={project.id}
-            passages={passages}
-            selectedPassage={selectedPassage}
-            onPassageCreated={handlePassageCreated}
-            onPassageClick={handlePassageClick}
-            onPassageDeleted={handlePassageDeleted}
-            onPassageUpdated={handlePassageUpdated}
-            jumpToPage={jumpToPage}
-            connectedPassages={showSimilarityLines ? sourceConnectedPassages : []}
-            onConnectedRectsChange={handleSourceRectsChange}
-            onLinkStart={secondPanelOpen ? (p, r) => handleLinkStart(p, r, 'first') : undefined}
-            linkingTarget={linkingPassage?.panel === 'second'}
-            onLinkTarget={linkingPassage?.panel === 'second' ? handleLinkTarget : undefined}
-            linkedPassages={secondPanelOpen ? linkedInFirstPanel : undefined}
-            onLinkedRectsChange={secondPanelOpen ? handleFirstLinkedRectsChange : undefined}
-            onUnlink={secondPanelOpen ? handleUnlink : undefined}
-            onFindSimilar={handleFindSimilar}
-            onPassageHover={handlePassageHover}
-          />
+          {pdfUrl && (
+            <PDFPanel
+              paperId={paper.id}
+              pdfUrl={pdfUrl}
+              projectId={project.id}
+              passages={passages}
+              selectedPassage={selectedPassage}
+              onPassageCreated={handlePassageCreated}
+              onPassageClick={handlePassageClick}
+              onPassageDeleted={handlePassageDeleted}
+              onPassageUpdated={handlePassageUpdated}
+              jumpToPage={jumpToPage}
+              connectedPassages={showSimilarityLines ? sourceConnectedPassages : []}
+              onConnectedRectsChange={handleSourceRectsChange}
+              onLinkStart={secondPanelOpen ? (p, r) => handleLinkStart(p, r, 'first') : undefined}
+              linkingTarget={linkingPassage?.panel === 'second'}
+              onLinkTarget={linkingPassage?.panel === 'second' ? handleLinkTarget : undefined}
+              linkedPassages={secondPanelOpen ? linkedInFirstPanel : undefined}
+              onLinkedRectsChange={secondPanelOpen ? handleFirstLinkedRectsChange : undefined}
+              onUnlink={secondPanelOpen ? handleUnlink : undefined}
+              onFindSimilar={handleFindSimilar}
+              onPassageHover={handlePassageHover}
+            />
+          )}
         </div>
 
-        {/* Second PDF */}
-        {connectedSimilar && (
+        {connectedSimilar && secondPdfUrl && (
           <div className="flex-1 min-w-0 flex flex-col">
             <div className="relative z-20 px-3 py-1.5 bg-purple-50 border-b border-purple-200 flex-shrink-0">
               <p className="text-xs text-purple-700 font-medium truncate">{connectedSimilar.paper_title}</p>
@@ -542,6 +494,7 @@ export function ReaderView({ paper, project, onBack }: Props) {
             <div className="flex-1 min-h-0">
               <PDFPanel
                 paperId={connectedSimilar.paper_id}
+                pdfUrl={secondPdfUrl}
                 projectId={project.id}
                 passages={secondPassages}
                 selectedPassage={secondSelectedPassage}
@@ -565,11 +518,11 @@ export function ReaderView({ paper, project, onBack }: Props) {
           </div>
         )}
 
-        {/* Context panel */}
         {contextOpen && (
           <div className="w-80 lg:w-96 flex-shrink-0">
             <ContextPanel
               paperId={paper.id}
+              paperTitle={paperInfo.title}
               projectId={project.id}
               passages={passages}
               selectedPassage={selectedPassage}
@@ -585,7 +538,6 @@ export function ReaderView({ paper, project, onBack }: Props) {
         )}
       </div>
 
-      {/* Overlay: similarity lines + link lines + rubber-band */}
       <ConnectionOverlay
         sourceRect={sourceRect}
         targetRects={showSimilarityLines ? targetRects : []}
@@ -596,29 +548,20 @@ export function ReaderView({ paper, project, onBack }: Props) {
         selectedPassageId={selectedPassage?.id}
       />
 
-      {/* Modal for selecting paper to open for similarities */}
       {similaritySelector && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-gray-800">Compare Similarities</h3>
-              <button
-                onClick={() => setSimilaritySelector(null)}
-                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
-              >
+              <button onClick={() => setSimilaritySelector(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
                 <X size={15} />
               </button>
             </div>
-            <p className="text-xs text-gray-400 mb-3">
-              Select a paper in the project to compare against:
-            </p>
+            <p className="text-xs text-gray-400 mb-3">Select a paper in the project to compare against:</p>
             <div className="space-y-1.5 max-h-60 overflow-y-auto">
               {similaritySelector.papers.map(p => (
-                <button
-                  key={p.paperId}
-                  onClick={() => handleSelectSimilarityPaper(p.paperId, p.title, p.matches)}
-                  className="w-full text-left p-3 border border-gray-100 hover:border-purple-300 hover:bg-purple-50 transition-colors flex items-center justify-between rounded-xl"
-                >
+                <button key={p.paperId} onClick={() => handleSelectSimilarityPaper(p.paperId, p.title, p.matches)}
+                  className="w-full text-left p-3 border border-gray-100 hover:border-purple-300 hover:bg-purple-50 transition-colors flex items-center justify-between rounded-xl">
                   <div className="min-w-0 pr-3">
                     <p className="text-xs font-semibold text-gray-700 truncate">{p.title}</p>
                     <p className="text-[10px] text-gray-400 mt-0.5">{p.matches.length} matching passage{p.matches.length !== 1 ? 's' : ''}</p>
@@ -632,32 +575,24 @@ export function ReaderView({ paper, project, onBack }: Props) {
           </div>
         </div>
       )}
-      {/* Modal for selecting any paper to open in compare panel */}
+
       {paperSelectorOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-gray-800">Compare with Paper</h3>
-              <button
-                onClick={() => setPaperSelectorOpen(false)}
-                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100"
-              >
+              <button onClick={() => setPaperSelectorOpen(false)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100">
                 <X size={15} />
               </button>
             </div>
-            <p className="text-xs text-gray-400 mb-3">
-              Select another paper from the project <strong>{project.name}</strong>:
-            </p>
+            <p className="text-xs text-gray-400 mb-3">Select another paper from <strong>{project.name}</strong>:</p>
             <div className="space-y-1.5 max-h-60 overflow-y-auto">
               {allPapersInProject.length === 0 ? (
                 <p className="text-xs text-gray-400 text-center py-4">No other papers in this project.</p>
               ) : (
                 allPapersInProject.map(p => (
-                  <button
-                    key={p.id}
-                    onClick={() => handleSelectComparePaper(p)}
-                    className="w-full text-left p-3 border border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-colors rounded-xl truncate text-xs font-semibold text-gray-700 block"
-                  >
+                  <button key={p.id} onClick={() => handleSelectComparePaper(p)}
+                    className="w-full text-left p-3 border border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-colors rounded-xl truncate text-xs font-semibold text-gray-700 block">
                     {p.title}
                   </button>
                 ))
@@ -666,108 +601,67 @@ export function ReaderView({ paper, project, onBack }: Props) {
           </div>
         </div>
       )}
-      {/* Paper info edit modal */}
+
       {editingInfo && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setEditingInfo(false)}>
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
               <h3 className="font-semibold text-gray-900">Paper Info</h3>
-              <button onClick={() => setEditingInfo(false)} className="text-gray-400 hover:text-gray-600">
-                <X size={18} />
-              </button>
+              <button onClick={() => setEditingInfo(false)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
             </div>
-
             <div className="px-6 py-5 space-y-4 overflow-y-auto">
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">Title</label>
-                <input
-                  value={editTitle}
-                  onChange={e => setEditTitle(e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
-                />
+                <input value={editTitle} onChange={e => setEditTitle(e.target.value)}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">DOI</label>
                 <div className="flex gap-2">
-                  <input
-                    value={editDoi}
-                    onChange={e => setEditDoi(e.target.value)}
-                    placeholder="10.xxxx/xxxxx"
-                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
-                  <button
-                    onClick={handleFetchMeta}
-                    disabled={fetchingMeta}
-                    title="Fetch metadata from Semantic Scholar / OpenAlex"
-                    className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
-                    Fetch
+                  <input value={editDoi} onChange={e => setEditDoi(e.target.value)} placeholder="10.xxxx/xxxxx"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                  <button onClick={handleFetchMeta} disabled={fetchingMeta}
+                    className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50">
+                    <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} /> Fetch
                   </button>
                 </div>
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">arXiv ID</label>
                 <div className="flex gap-2">
-                  <input
-                    value={editArxivId}
-                    onChange={e => setEditArxivId(e.target.value)}
-                    placeholder="2301.07041"
-                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
-                  />
+                  <input value={editArxivId} onChange={e => setEditArxivId(e.target.value)} placeholder="2301.07041"
+                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400" />
                   {!editDoi && (
-                    <button
-                      onClick={handleFetchMeta}
-                      disabled={fetchingMeta}
-                      title="Fetch metadata using arXiv ID"
-                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50"
-                    >
-                      <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} />
-                      Fetch
+                    <button onClick={handleFetchMeta} disabled={fetchingMeta}
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-colors disabled:opacity-50">
+                      <RefreshCw size={13} className={fetchingMeta ? 'animate-spin' : ''} /> Fetch
                     </button>
                   )}
                 </div>
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">Abstract</label>
-                <textarea
-                  value={editAbstract}
-                  onChange={e => setEditAbstract(e.target.value)}
-                  rows={5}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
-                />
+                <textarea value={editAbstract} onChange={e => setEditAbstract(e.target.value)} rows={5}
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none" />
               </div>
-
               {fetchedMeta && (
                 <div className="bg-gray-50 rounded-lg px-4 py-3 text-xs text-gray-600 space-y-1">
                   {fetchedMeta.authors && fetchedMeta.authors.length > 0 && (
-                    <p>
-                      <span className="font-medium">Authors: </span>
+                    <p><span className="font-medium">Authors: </span>
                       {fetchedMeta.authors.slice(0, 5).join(', ')}
                       {fetchedMeta.authors.length > 5 ? ` +${fetchedMeta.authors.length - 5} more` : ''}
                     </p>
                   )}
                   {fetchedMeta.year && <p><span className="font-medium">Year: </span>{fetchedMeta.year}</p>}
                   {fetchedMeta.venue && <p><span className="font-medium">Venue: </span>{fetchedMeta.venue}</p>}
-                  <p className="text-gray-400 pt-0.5">
-                    Source: {fetchedMeta.source === 'semantic_scholar' ? 'Semantic Scholar' : 'OpenAlex'}
-                  </p>
+                  <p className="text-gray-400 pt-0.5">Source: {fetchedMeta.source === 'semantic_scholar' ? 'Semantic Scholar' : 'OpenAlex'}</p>
                 </div>
               )}
             </div>
-
             <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-100">
-              <button onClick={() => setEditingInfo(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveInfo}
-                disabled={savingInfo}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
-              >
+              <button onClick={() => setEditingInfo(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">Cancel</button>
+              <button onClick={handleSaveInfo} disabled={savingInfo}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50">
                 {savingInfo ? 'Saving…' : 'Save'}
               </button>
             </div>

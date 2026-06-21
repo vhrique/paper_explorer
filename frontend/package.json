@@ -10,8 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "axios": "^1.13.2",
+    "@tensorflow/tfjs": "^4.22.0",
     "lucide-react": "^0.554.0",
+    "minisearch": "^7.1.0",
     "pdfjs-dist": "^3.11.174",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
