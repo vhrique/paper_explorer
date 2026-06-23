@@ -580,7 +580,7 @@ export function PDFPanel({ paperId, pdfUrl, projectId, passages, selectedPassage
                           className="absolute z-50 pointer-events-auto bg-white rounded-xl shadow-xl border border-gray-200 p-2 w-56"
                           style={{
                             left: `${firstRect.x * 100}%`,
-                            top: `calc(${firstRect.y * 100}% - 8px)`,
+                            top: `calc(${firstRect.y * 100}% - 38px)`,
                             transform: 'translateY(-100%)',
                           }}
                         >

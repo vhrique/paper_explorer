@@ -35,6 +35,7 @@ async function loadHandle(): Promise<FileSystemDirectoryHandle | null> {
 
 export class LocalFolderAdapter implements StorageAdapter {
   private root: FileSystemDirectoryHandle | null = null;
+  private dirCache = new Map<string, FileSystemDirectoryHandle>();
 
   async connect(): Promise<void> {
     this.root = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
@@ -73,9 +74,21 @@ export class LocalFolderAdapter implements StorageAdapter {
     const parts = path.split('/');
     let dir = this.root!;
     for (let i = 0; i < parts.length - 1; i++) {
-      dir = await dir.getDirectoryHandle(parts[i], { create });
+      const cacheKey = parts.slice(0, i + 1).join('/');
+      const cached = this.dirCache.get(cacheKey);
+      if (cached && !create) {
+        dir = cached;
+      } else {
+        dir = await dir.getDirectoryHandle(parts[i], { create });
+        if (!create) this.dirCache.set(cacheKey, dir);
+      }
     }
     return { dir, name: parts[parts.length - 1] };
+  }
+
+  /** Clear the directory handle cache (call after deleting/renaming directories). */
+  clearDirCache(): void {
+    this.dirCache.clear();
   }
 
   async readJSON<T>(path: string): Promise<T | null> {

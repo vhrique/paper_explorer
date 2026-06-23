@@ -26,12 +26,13 @@ interface Props {
   linksVersion?: number;
   forceTab?: string;
   onNotesChanged?: () => void;
+  onSimilarResults?: (results: SimilarPassage[], paperId: number) => void;
 }
 
 export function ContextPanel({
   paperId, paperTitle, projectId, passages, selectedPassage,
   onSelectPassage, onPassageDeleted, onPassageUpdated, onSimilarClick,
-  onOpenLinkedPaper, onLinkDeleted, linksVersion, forceTab, onNotesChanged,
+  onOpenLinkedPaper, onLinkDeleted, linksVersion, forceTab, onNotesChanged, onSimilarResults,
 }: Props) {
   const [tab, setTab] = useState<Tab>('passages');
   const [tags, setTags] = useState<Tag[]>([]);
@@ -68,17 +69,25 @@ export function ContextPanel({
   }, [projectId, paperId]);
 
   useEffect(() => {
+    if (tab !== 'similar') return;
     if (!selectedPassage) { setSimilar([]); return; }
     setSimilarLoading(true);
-    ws.getPassageEmbeddings(paperId)
-      .then(async embs => {
-        const match = embs.find(e => e.id === selectedPassage.id);
-        return computeSimilarAll(match?.embedding ?? null, selectedPassage.text, projectId, paperId, 10);
-      })
-      .then(result => setSimilar(result ?? []))
-      .catch(() => setSimilar([]))
-      .finally(() => setSimilarLoading(false));
-  }, [selectedPassage?.id, projectId, paperId]);
+    const timer = setTimeout(() => {
+      ws.getPassageEmbeddings(paperId)
+        .then(async embs => {
+          const match = embs.find(e => e.id === selectedPassage.id);
+          return computeSimilarAll(match?.embedding ?? null, selectedPassage.text, projectId, paperId, 10);
+        })
+        .then(result => {
+          const list = result ?? [];
+          setSimilar(list);
+          onSimilarResults?.(list, paperId);
+        })
+        .catch(() => setSimilar([]))
+        .finally(() => setSimilarLoading(false));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [selectedPassage?.id, projectId, paperId, tab]);
 
   useEffect(() => {
     if (!selectedPassage) { setNotes([]); setLinkedNotes([]); return; }
