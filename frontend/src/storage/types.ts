@@ -80,6 +80,7 @@ export interface StoredNote {
   content: string;
   passage_ids: number[];
   tag_ids: number[];
+  embedding?: number[];
   created_at: string;
   updated_at: string;
 }

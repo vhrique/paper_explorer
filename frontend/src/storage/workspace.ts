@@ -675,6 +675,31 @@ export async function updatePassageEmbedding(passageId: number, paperId: number,
   }
 }
 
+export async function updateNoteEmbedding(noteId: number, paperId: number, embedding: number[]): Promise<void> {
+  const ann = await loadAnnotations(paperId);
+  const sn = ann.notes.find(n => n.id === noteId);
+  if (sn) {
+    sn.embedding = embedding;
+    await saveAnnotations(paperId, ann);
+  }
+}
+
+export async function getNoteEmbeddingsForProject(
+  projectId: number,
+): Promise<Array<{ embedding: number[]; passageIds: number[] }>> {
+  const papers = await getProjectPapers(projectId);
+  const results: Array<{ embedding: number[]; passageIds: number[] }> = [];
+  for (const paper of papers) {
+    const ann = await loadAnnotations(paper.id);
+    for (const note of ann.notes) {
+      if (note.embedding?.length && note.passage_ids.length > 0) {
+        results.push({ embedding: note.embedding, passageIds: note.passage_ids });
+      }
+    }
+  }
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // Embedding status + reprocessing
 // ---------------------------------------------------------------------------
