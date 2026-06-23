@@ -1,27 +1,16 @@
-**/__pycache__/
+# Python
+__pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-env/
+.venv/
 venv/
-.env
-.venv
-env.bak/
-venv.bak/
-
-# Database
-*.db
-*.sqlite3
-chroma_db/
-
-# Static files (user uploads and generated content)
-backend/static/images/*
-backend/static/pdfs/*
-!backend/static/images/.gitkeep
-!backend/static/pdfs/.gitkeep
 
 # Node
 node_modules/
 dist/
+
+# Local user data (File System Access API workspace folder)
+storage/
+
+# OS
 .DS_Store
+Thumbs.db
