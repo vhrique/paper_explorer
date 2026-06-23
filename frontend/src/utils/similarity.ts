@@ -20,7 +20,7 @@ export interface PaperChunkData {
   pages: number[];
   granularities: string[];
   parentIndices: number[];
-  rects: Array<{ x: number; y: number; width: number; height: number }>;
+  rects: Array<Array<{ x: number; y: number; width: number; height: number }>>;
   embeddings: Float32Array;
   embDim: number;
   embeddingModel: string;  // '' when no embeddings
@@ -56,7 +56,7 @@ async function loadPaperChunks(paperId: number, paperTitle: string): Promise<voi
     pages: meta.chunks.map(c => c.page),
     granularities: meta.chunks.map(c => c.granularity),
     parentIndices: meta.chunks.map(c => c.parent_idx),
-    rects: meta.chunks.map(c => c.rects[0] ?? { x: 0, y: 0, width: 0, height: 0 }),
+    rects: meta.chunks.map(c => c.rects.length ? c.rects : [{ x: 0, y: 0, width: 0, height: 0 }]),
     embeddings: embBuf && meta.embedding_dim > 0 ? new Float32Array(embBuf) : new Float32Array(0),
     embDim: meta.embedding_dim,
     embeddingModel: meta.embedding_model ?? '',
@@ -208,9 +208,11 @@ export async function computeSimilarAll(
   projectId: number,
   currentPaperId: number,
   limit = 10,
+  targetPaperId?: number,
 ): Promise<SimilarPassage[]> {
   const papers = await workspace.getProjectPapers(projectId);
-  const others = papers.filter(p => p.id !== currentPaperId);
+  let others = papers.filter(p => p.id !== currentPaperId);
+  if (targetPaperId !== undefined) others = others.filter(p => p.id === targetPaperId);
   const currentModelId = getEmbeddingModelId();
 
   await Promise.all(
@@ -263,22 +265,23 @@ export async function computeSimilarAll(
   return resolveHits(allHits, papers, limit);
 }
 
-/** Shared resolution logic for both embedding and BM25 hits. */
-async function resolveHits(
+/** Resolve hits for a single paper: sort, dedup, take top-limit, hydrate. */
+async function resolvePaperHits(
   hits: RawHit[],
-  papers: Array<{ id: number; title: string }>,
+  paperId: number,
+  paperTitle: string,
   limit: number,
 ): Promise<SimilarPassage[]> {
   hits.sort((a, b) => b.sim - a.sim);
 
-  // Sentence wins over its parent paragraph
-  const sentenceParentsCovered = new Set<string>();
+  // Sentence wins over its parent paragraph (within this paper)
+  const sentenceParentsCovered = new Set<number>();
   for (const hit of hits) {
     if (hit.source === 'chunk') {
-      const cached = chunkCache.get(hit.paperId)!;
+      const cached = chunkCache.get(paperId);
       if (cached?.granularities[hit.idx] === 'sentence') {
         const parentIdx = cached.parentIndices[hit.idx];
-        if (parentIdx >= 0) sentenceParentsCovered.add(`${hit.paperId}:${parentIdx}`);
+        if (parentIdx >= 0) sentenceParentsCovered.add(parentIdx);
       }
     }
   }
@@ -288,66 +291,64 @@ async function resolveHits(
 
   for (const hit of hits) {
     if (results.length >= limit) break;
-
     if (hit.source === 'chunk') {
-      const key = `chunk:${hit.paperId}:${hit.idx}`;
+      const key = `chunk:${hit.idx}`;
       if (seen.has(key)) continue;
-      const cached = chunkCache.get(hit.paperId);
+      const cached = chunkCache.get(paperId);
       if (!cached) continue;
       const gran = cached.granularities[hit.idx];
-      if (gran === 'paragraph' && sentenceParentsCovered.has(`${hit.paperId}:${hit.idx}`)) continue;
+      if (gran === 'paragraph' && sentenceParentsCovered.has(hit.idx)) continue;
       seen.add(key);
       results.push({
-        passage_id: hit.idx,
-        paper_id: hit.paperId,
-        paper_title: cached.paperTitle,
-        page: cached.pages[hit.idx],
-        text: cached.texts[hit.idx],
-        similarity: hit.sim,
-        rects: [cached.rects[hit.idx]],
-        tags: [],
-        source: 'chunk',
+        passage_id: hit.idx, paper_id: paperId, paper_title: paperTitle,
+        page: cached.pages[hit.idx], text: cached.texts[hit.idx],
+        similarity: hit.sim, rects: cached.rects[hit.idx], tags: [], source: 'chunk',
       });
     } else {
-      const key = `passage:${hit.paperId}:${hit.passageId}`;
+      const key = `passage:${hit.passageId}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const paper = papers.find(p => p.id === hit.paperId);
       results.push({
-        passage_id: hit.passageId,
-        paper_id: hit.paperId,
-        paper_title: paper?.title ?? '',
-        page: 0,
-        text: '',
-        similarity: hit.sim,
-        rects: [],
-        tags: [],
-        source: 'passage',
+        passage_id: hit.passageId, paper_id: paperId, paper_title: paperTitle,
+        page: 0, text: '', similarity: hit.sim, rects: [], tags: [], source: 'passage',
       });
     }
   }
 
   // Hydrate passage-source results
-  const passageResults = results.filter(r => r.source === 'passage');
-  if (passageResults.length > 0) {
-    const byPaper = new Map<number, SimilarPassage[]>();
-    for (const r of passageResults) {
-      if (!byPaper.has(r.paper_id)) byPaper.set(r.paper_id, []);
-      byPaper.get(r.paper_id)!.push(r);
-    }
-    await Promise.all(
-      [...byPaper.entries()].map(async ([paperId, items]) => {
-        try {
-          const passages: Passage[] = await workspace.getPassages(paperId);
-          const pMap = new Map(passages.map(p => [p.id, p]));
-          for (const item of items) {
-            const p = pMap.get(item.passage_id);
-            if (p) { item.page = p.page; item.text = p.text; item.rects = p.rects; item.tags = p.tags; }
-          }
-        } catch (_) {}
-      }),
-    );
+  const passageItems = results.filter(r => r.source === 'passage');
+  if (passageItems.length > 0) {
+    try {
+      const passages: Passage[] = await workspace.getPassages(paperId);
+      const pMap = new Map(passages.map(p => [p.id, p]));
+      for (const item of passageItems) {
+        const p = pMap.get(item.passage_id);
+        if (p) { item.page = p.page; item.text = p.text; item.rects = p.rects; item.tags = p.tags; }
+      }
+    } catch (_) {}
   }
 
   return results.filter(r => r.text);
+}
+
+/** Resolve hits grouped per paper, applying limit independently to each paper. */
+async function resolveHits(
+  hits: RawHit[],
+  papers: Array<{ id: number; title: string }>,
+  limit: number,
+): Promise<SimilarPassage[]> {
+  const byPaper = new Map<number, RawHit[]>();
+  for (const hit of hits) {
+    if (!byPaper.has(hit.paperId)) byPaper.set(hit.paperId, []);
+    byPaper.get(hit.paperId)!.push(hit);
+  }
+
+  const perPaperResults = await Promise.all(
+    [...byPaper.entries()].map(([pid, paperHits]) => {
+      const paper = papers.find(p => p.id === pid);
+      return resolvePaperHits(paperHits, pid, paper?.title ?? '', limit);
+    }),
+  );
+
+  return perPaperResults.flat();
 }

@@ -60,31 +60,56 @@ function buildWordSequence(words: Array<{ text: string; x0: number; y0: number; 
   return { fullText, entries };
 }
 
-function findRectInSequence(
+function findRectsInSequence(
   text: string,
   fullSeq: string,
   entries: WordEntry[],
   pw: number,
   ph: number,
   startPos: number,
-): { rect: Rect | null; endPos: number } {
+): { rects: Rect[]; endPos: number } {
   const norm = text.replace(/\s+/g, ' ').trim();
   const idx = fullSeq.indexOf(norm, startPos);
-  if (idx === -1) return { rect: null, endPos: startPos };
+  if (idx === -1) return { rects: [], endPos: startPos };
 
   const tEnd = idx + norm.length;
   const matching = entries.filter(e => e.charStart < tEnd && e.charEnd > idx);
-  if (!matching.length) return { rect: null, endPos: startPos };
+  if (!matching.length) return { rects: [], endPos: startPos };
 
-  const x0 = Math.min(...matching.map(e => e.x0));
-  const y0 = Math.min(...matching.map(e => e.y0));
-  const x1 = Math.max(...matching.map(e => e.x1));
-  const y1 = Math.max(...matching.map(e => e.y1));
+  // Group matching words into per-line rects to avoid spanning columns.
+  matching.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  const lineGroups: WordEntry[][] = [[matching[0]]];
+  for (let i = 1; i < matching.length; i++) {
+    const prev = matching[i - 1];
+    const curr = matching[i];
+    const h = Math.max(curr.y1 - curr.y0, prev.y1 - prev.y0);
+    if (Math.abs(curr.y0 - prev.y0) > h * 0.5) {
+      lineGroups.push([curr]);
+    } else {
+      lineGroups[lineGroups.length - 1].push(curr);
+    }
+  }
 
-  return {
-    rect: { x: x0 / pw, y: y0 / ph, width: (x1 - x0) / pw, height: (y1 - y0) / ph },
-    endPos: tEnd,
-  };
+  const rects = lineGroups.map(group => {
+    const x0 = Math.min(...group.map(e => e.x0));
+    const y0 = Math.min(...group.map(e => e.y0));
+    const x1 = Math.max(...group.map(e => e.x1));
+    const y1 = Math.max(...group.map(e => e.y1));
+    return { x: x0 / pw, y: y0 / ph, width: (x1 - x0) / pw, height: (y1 - y0) / ph };
+  });
+
+  return { rects, endPos: tEnd };
+}
+
+function blockToLineRects(block: RawBlock, pw: number, ph: number): Rect[] {
+  return block.lines.map(line => {
+    const ws = line.words;
+    const x0 = Math.min(...ws.map(w => w.x0));
+    const y0 = Math.min(...ws.map(w => w.y0));
+    const x1 = Math.max(...ws.map(w => w.x1));
+    const y1 = Math.max(...ws.map(w => w.y1));
+    return { x: x0 / pw, y: y0 / ph, width: (x1 - x0) / pw, height: (y1 - y0) / ph };
+  });
 }
 
 // ---- pdfjs text extraction ----
@@ -113,63 +138,57 @@ function extractPageBlocks(
 ): RawBlock[] {
   if (!items.length) return [];
 
-  // pdfjs uses bottom-left origin; convert to top-left
+  // pdfjs returns TextItems in PDF content-stream order. For well-formed
+  // academic PDFs (LaTeX) this is reading order: column 1 top→bottom, then
+  // column 2 top→bottom. We trust this order and detect block/line boundaries
+  // purely from y-position changes — no column detection needed.
   const words: RawWord[] = items
     .filter(item => item.str.trim())
     .map(item => {
-      const [, , , , tx, ty] = item.transform as number[];
-      const x0 = tx;
-      const y0 = pageHeight - ty - (item.height || 0);
+      const [a, b, , d, tx, ty] = item.transform as number[];
+      const fontH = item.height || Math.abs(d) || Math.sqrt(a * a + b * b) || 10;
       return {
         text: item.str.trimEnd(),
-        x0,
-        y0,
-        x1: x0 + (item.width || 0),
-        y1: y0 + (item.height || 0),
+        x0: tx,
+        y0: pageHeight - ty - fontH,
+        x1: tx + (item.width || 0),
+        y1: pageHeight - ty,
       };
     })
     .filter(w => w.text.trim());
 
   if (!words.length) return [];
 
-  // Group words into lines by Y proximity
-  words.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
-
-  const lines: RawLine[] = [];
-  let currentLine: RawWord[] = [words[0]];
+  const blocks: RawBlock[] = [];
+  let blockLines: RawLine[] = [];
+  let lineWords: RawWord[] = [words[0]];
   let lineY = words[0].y0;
   let lineH = words[0].y1 - words[0].y0;
 
   for (let i = 1; i < words.length; i++) {
     const w = words[i];
-    const threshold = Math.max(lineH * 0.5, 2);
-    if (Math.abs(w.y0 - lineY) <= threshold) {
-      currentLine.push(w);
+    const yDiff = w.y0 - lineY;
+
+    if (Math.abs(yDiff) <= Math.max(lineH * 0.5, 2)) {
+      // Same line
+      lineWords.push(w);
       lineH = Math.max(lineH, w.y1 - w.y0);
     } else {
-      lines.push({ words: currentLine, y: lineY, height: lineH });
-      currentLine = [w];
+      blockLines.push({ words: lineWords, y: lineY, height: lineH });
+
+      if (yDiff < 0 || yDiff > lineH * 1.2) {
+        // y went backward (column jump) or large gap (paragraph break)
+        blocks.push(makeBlock(blockLines, pageWidth, pageHeight));
+        blockLines = [];
+      }
+
+      lineWords = [w];
       lineY = w.y0;
       lineH = w.y1 - w.y0;
     }
   }
-  lines.push({ words: currentLine, y: lineY, height: lineH });
 
-  // Group lines into blocks by vertical gap
-  const blocks: RawBlock[] = [];
-  let blockLines: RawLine[] = [lines[0]];
-
-  for (let i = 1; i < lines.length; i++) {
-    const prev = lines[i - 1];
-    const curr = lines[i];
-    const gap = curr.y - (prev.y + prev.height);
-    if (gap > prev.height * 1.2) {
-      blocks.push(makeBlock(blockLines, pageWidth, pageHeight));
-      blockLines = [curr];
-    } else {
-      blockLines.push(curr);
-    }
-  }
+  blockLines.push({ words: lineWords, y: lineY, height: lineH });
   blocks.push(makeBlock(blockLines, pageWidth, pageHeight));
 
   return blocks.filter(b => b.text.length >= MIN_BLOCK_CHARS);
@@ -275,12 +294,7 @@ export async function processPaperClientSide(
       const blockWords = block.lines.flatMap(l => l.words);
       const { fullText: blockSeq, entries: blockEntries } = buildWordSequence(blockWords);
 
-      const blockRect: Rect = {
-        x: block.x0 / pw,
-        y: block.y0 / ph,
-        width: (block.x1 - block.x0) / pw,
-        height: (block.y1 - block.y0) / ph,
-      };
+      const blockLineRects = blockToLineRects(block, pw, ph);
 
       const blockIdx = chunkIdx++;
       allChunkMeta.push({
@@ -289,7 +303,7 @@ export async function processPaperClientSide(
         page: pageNum,
         granularity: 'block',
         parent_idx: -1,
-        rects: [blockRect],
+        rects: blockLineRects,
       });
 
       const paraTexts = splitIntoParagraphs(block.text);
@@ -299,11 +313,11 @@ export async function processPaperClientSide(
       for (const paraText of parasToProcess) {
         if (paraText.length < MIN_PARA_CHARS) continue;
 
-        const { rect: paraRect, endPos: paraEnd } = findRectInSequence(
+        const { rects: paraRects, endPos: paraEnd } = findRectsInSequence(
           paraText, blockSeq, blockEntries, pw, ph, paraSearchPos,
         );
-        const resolvedParaRect = paraRect ?? blockRect;
-        if (paraRect) paraSearchPos = paraEnd;
+        const resolvedParaRects = paraRects.length ? paraRects : blockLineRects;
+        if (paraRects.length) paraSearchPos = paraEnd;
 
         const paraIdx = chunkIdx++;
         allChunkMeta.push({
@@ -312,13 +326,13 @@ export async function processPaperClientSide(
           page: pageNum,
           granularity: 'paragraph',
           parent_idx: blockIdx,
-          rects: [resolvedParaRect],
+          rects: resolvedParaRects,
         });
 
         // Narrow words to paragraph y-range for sentence matching
-        const py0 = resolvedParaRect.y * ph - 2;
-        const py1 = (resolvedParaRect.y + resolvedParaRect.height) * ph + 2;
-        const paraWords = blockWords.filter(w => w.y0 >= py0 && w.y1 <= py1 + 2);
+        const paraY0 = Math.min(...resolvedParaRects.map(r => r.y)) * ph - 2;
+        const paraY1 = Math.max(...resolvedParaRects.map(r => r.y + r.height)) * ph + 2;
+        const paraWords = blockWords.filter(w => w.y0 >= paraY0 && w.y1 <= paraY1 + 2);
         const { fullText: paraSeq, entries: paraEntries } = buildWordSequence(
           paraWords.length ? paraWords : blockWords,
         );
@@ -330,10 +344,10 @@ export async function processPaperClientSide(
         for (const sentText of sentences) {
           if (sentText.length < MIN_SENT_CHARS) continue;
 
-          const { rect: sentRect, endPos: sentEnd } = findRectInSequence(
+          const { rects: sentRects, endPos: sentEnd } = findRectsInSequence(
             sentText, paraSeq, paraEntries, pw, ph, sentSearchPos,
           );
-          if (sentRect) sentSearchPos = sentEnd;
+          if (sentRects.length) sentSearchPos = sentEnd;
 
           allChunkMeta.push({
             idx: chunkIdx++,
@@ -341,7 +355,7 @@ export async function processPaperClientSide(
             page: pageNum,
             granularity: 'sentence',
             parent_idx: paraIdx,
-            rects: [sentRect ?? resolvedParaRect],
+            rects: sentRects.length ? sentRects : resolvedParaRects,
           });
         }
       }
