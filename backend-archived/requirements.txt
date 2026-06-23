@@ -1,9 +1,0 @@
-fastapi
-uvicorn[standard]
-pymupdf
-numpy
-openai
-python-multipart
-boto3
-google-cloud-storage
-python-dotenv
