@@ -3,7 +3,8 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import { api, type Passage, type Rect, type Tag } from '../api';
-import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink, Sparkles } from 'lucide-react';
+import * as ws from '../storage/workspace';
+import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink, Sparkles, StickyNote } from 'lucide-react';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.js',
@@ -29,6 +30,7 @@ interface ConnectedPassage {
 
 interface Props {
   paperId: number;
+  pdfUrl: string;
   projectId: number;
   passages: Passage[];
   selectedPassage: Passage | null;
@@ -50,9 +52,11 @@ interface Props {
   onUnlink?: (passageId: number) => void;
   onFindSimilar?: (passage: Passage) => void;
   onPassageHover?: (passageId: number | null) => void;
+  notesByPassageId?: Record<number, { id: number; content: string }[]>;
+  onNoteClick?: (passage: Passage) => void;
 }
 
-export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover }: Props) {
+export function PDFPanel({ paperId, pdfUrl, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover, notesByPassageId, onNoteClick }: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
   const [pending, setPending] = useState<PendingSelection | null>(null);
@@ -62,6 +66,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   const [tags, setTags] = useState<Tag[]>([]);
   const [hoveredPassageId, setHoveredPassageId] = useState<number | null>(null);
   const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
+  const [notesPopupPassageId, setNotesPopupPassageId] = useState<number | null>(null);
   const [newTagName, setNewTagName] = useState('');
   const [addingTag, setAddingTag] = useState(false);
   const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -169,10 +174,8 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   }, [linkedPassages, scale, numPages, onLinkedRectsChange]);
 
   useEffect(() => {
-    api.listTags(projectId).then(setTags);
+    ws.getTags(projectId).then(setTags);
   }, [projectId]);
-
-  const pdfUrl = api.getPaperPdfUrl(paperId);
 
   useEffect(() => {
     if (jumpToPage == null) return;
@@ -257,7 +260,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
 
   const handleCreatePassage = async () => {
     if (!pending) return;
-    const passage = await api.createPassage(paperId, {
+    const passage = await ws.createPassage(paperId, {
       page: pending.page,
       text: pending.text,
       rects: pending.rects,
@@ -266,10 +269,14 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
     onPassageCreated(passage);
     setPending(null);
     window.getSelection()?.removeAllRanges();
+    // Embed in background so it's available for future similarity search
+    api.embedText(pending.text).then(({ embedding }) =>
+      ws.updatePassageEmbedding(passage.id, paperId, embedding)
+    ).catch(() => {});
   };
 
   const handlePageMouseMove = (e: React.MouseEvent<HTMLDivElement>, pageIndex: number) => {
-    if (taggingPassageId !== null) return;
+    if (taggingPassageId !== null || notesPopupPassageId !== null) return;
     if ((e.target as HTMLElement).closest('[data-passage-toolbar]')) {
       if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
       return;
@@ -298,19 +305,21 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
   };
 
   const handleDeletePassage = async (id: number) => {
-    await api.deletePassage(id);
+    const passage = passages.find(p => p.id === id);
+    if (!passage) return;
+    await ws.deletePassage(id, paperId);
     onPassageDeleted(id);
     setTaggingPassageId(null);
   };
 
   const handleAddTag = async (tag: Tag, passage: Passage) => {
-    await api.addPassageTag(passage.id, tag.id);
+    await ws.addPassageTag(passage.id, tag.id, passage.paper_id);
     onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
     setTaggingPassageId(null);
   };
 
   const handleRemoveTag = async (tagId: number, passage: Passage) => {
-    await api.removePassageTag(passage.id, tagId);
+    await ws.removePassageTag(passage.id, tagId, passage.paper_id);
     onPassageUpdated({ ...passage, tags: passage.tags.filter(t => t.id !== tagId) });
     const stillUsed = passages.some(p => p.id !== passage.id && p.tags.some(t => t.id === tagId));
     if (!stillUsed) setTags(prev => prev.filter(t => t.id !== tagId));
@@ -318,7 +327,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
 
   const handleCreateTag = async (passage: Passage) => {
     if (!newTagName.trim()) return;
-    const tag = await api.createTag(newTagName.trim(), 'content', projectId);
+    const tag = await ws.createTag(newTagName.trim(), 'content', projectId);
     setTags(prev => [...prev, tag]);
     setNewTagName('');
     setAddingTag(false);
@@ -364,7 +373,7 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
               ref={el => { pageRefs.current[i] = el; }}
               className="relative shadow-lg"
               onMouseMove={e => handlePageMouseMove(e, i)}
-              onMouseLeave={() => { if (taggingPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => { setHoveredPassageId(null); onPassageHover?.(null); }, 300); } }}
+              onMouseLeave={() => { if (taggingPassageId === null && notesPopupPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => { setHoveredPassageId(null); onPassageHover?.(null); }, 300); } }}
               onClick={e => {
                 const el = pageRefs.current[i];
                 if (!el) return;
@@ -396,6 +405,9 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                   const availableTags = tags.filter(t => !passageTagIds.has(t.id) && t.type === 'content');
                   const isHovered = hoveredPassageId === passage.id;
                   const isLinked = linkedPassages?.some(lp => lp.passageId === passage.id) ?? false;
+                  const passageNotes = notesByPassageId?.[passage.id] ?? [];
+                  const hasNotes = passageNotes.length > 0;
+                  const isNotesOpen = notesPopupPassageId === passage.id;
                   return (
                     <div key={passage.id} style={{ position: 'static' }}>
                       {passage.rects.map((rect, ri) => (
@@ -414,8 +426,27 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                         />
                       ))}
 
+                      {/* Note count badge — always visible when passage has notes */}
+                      {hasNotes && firstRect && (
+                        <div
+                          className="absolute z-40 pointer-events-auto"
+                          style={{
+                            left: `calc(${(firstRect.x + firstRect.width) * 100}% - 8px)`,
+                            top: `calc(${firstRect.y * 100}% - 8px)`,
+                          }}
+                        >
+                          <button
+                            onClick={e => { e.stopPropagation(); setNotesPopupPassageId(isNotesOpen ? null : passage.id); setTaggingPassageId(null); }}
+                            className="w-5 h-5 bg-amber-400 rounded-full flex items-center justify-center shadow-sm hover:bg-amber-500 transition-colors"
+                            title={`${passageNotes.length} note(s) — click to preview`}
+                          >
+                            <StickyNote size={9} className="text-white" />
+                          </button>
+                        </div>
+                      )}
+
                       {/* Hover toolbar */}
-                      {(isHovered || isTagging) && firstRect && (
+                      {(isHovered || isTagging || isNotesOpen) && firstRect && (
                         <div
                           data-passage-toolbar
                           className="absolute z-50 pointer-events-auto flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1.5 py-1"
@@ -468,6 +499,13 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                               <Unlink size={13} />
                             </button>
                           )}
+                          <button
+                            onClick={e => { e.stopPropagation(); setNotesPopupPassageId(isNotesOpen ? null : passage.id); setTaggingPassageId(null); }}
+                            className={`p-1 rounded transition-colors ${hasNotes ? 'text-amber-500 hover:text-amber-700 hover:bg-amber-50' : 'text-gray-500 hover:text-amber-600 hover:bg-amber-50'}`}
+                            title={hasNotes ? `${passageNotes.length} note(s)` : 'Add note'}
+                          >
+                            <StickyNote size={13} />
+                          </button>
                           <button
                             onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
                             className="p-1 text-gray-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
@@ -532,6 +570,38 @@ export function PDFPanel({ paperId, projectId, passages, selectedPassage, onPass
                               <button onClick={() => handleCreateTag(passage)} className="px-2 py-1 bg-blue-600 text-white text-xs rounded-lg">Add</button>
                               <button onClick={() => setAddingTag(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={12} /></button>
                             </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Notes popup */}
+                      {isNotesOpen && firstRect && (
+                        <div
+                          data-passage-toolbar
+                          className="absolute z-50 pointer-events-auto bg-white rounded-xl shadow-xl border border-gray-200 p-2 w-56"
+                          style={{
+                            left: `${firstRect.x * 100}%`,
+                            top: `calc(${firstRect.y * 100}% - 38px)`,
+                            transform: 'translateY(-100%)',
+                          }}
+                        >
+                          {passageNotes.length > 0 ? (
+                            <div className="space-y-1.5 mb-2 max-h-40 overflow-y-auto">
+                              {passageNotes.map(note => (
+                                <div key={note.id} className="text-xs text-gray-700 bg-amber-50 rounded-lg p-2">
+                                  <p className="line-clamp-3 leading-relaxed">{note.content}</p>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-gray-400 text-center py-1 mb-1">No notes yet</p>
+                          )}
+                          {onNoteClick && (
+                            <button
+                              onClick={() => { onNoteClick(passage); setNotesPopupPassageId(null); }}
+                              className="w-full py-1.5 text-xs text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            >
+                              {hasNotes ? 'Edit in sidebar →' : 'Add note in sidebar →'}
+                            </button>
                           )}
                         </div>
                       )}

@@ -1,6 +1,9 @@
-import axios from 'axios';
+import { processPaperClientSide } from '../services/pdfProcessor';
+import { embedText as embedTextService } from '../services/embeddingService';
+import { answerQuestion } from '../services/llmService';
+import { fetchPaperMetadata } from '../services/metadataService';
 
-const BASE = import.meta.env.VITE_API_URL || '/api';
+// ---- Shared types (used by both API and storage layer) ----
 
 export interface Project {
   id: number;
@@ -113,86 +116,39 @@ export interface PaperMetadataResult {
   source: string;
 }
 
+export interface ChunkMetaItem {
+  idx: number;
+  text: string;
+  page: number;
+  granularity: string;
+  parent_idx: number;
+  rects: Rect[];
+}
+
+export interface ProcessResponse {
+  metadata: { title: string; filename: string; doi?: string; arxiv_id?: string; abstract?: string };
+  embeddings_bin_b64: string;
+  chunk_meta: ChunkMetaItem[];
+  embedding_dim: number;
+  embedding_model: string;  // '' when no API configured
+}
+
+// ---- Client-side implementations of the former backend API ----
+
 export const api = {
-  // Projects
-  listProjects: () => axios.get<Project[]>(`${BASE}/projects`).then(r => r.data),
-  createProject: (name: string, description?: string) =>
-    axios.post<Project>(`${BASE}/projects`, { name, description }).then(r => r.data),
-  updateProject: (id: number, data: Partial<Project>) =>
-    axios.patch<Project>(`${BASE}/projects/${id}`, data).then(r => r.data),
-  deleteProject: (id: number) => axios.delete(`${BASE}/projects/${id}`),
+  processPaper: (file: File): Promise<ProcessResponse> =>
+    processPaperClientSide(file),
 
-  // Papers
-  listAllPapers: () =>
-    axios.get<Paper[]>(`${BASE}/papers`).then(r => r.data),
-  listPapers: (projectId: number) =>
-    axios.get<Paper[]>(`${BASE}/projects/${projectId}/papers`).then(r => r.data),
-  getPaper: (id: number) => axios.get<Paper>(`${BASE}/papers/${id}`).then(r => r.data),
-  uploadPaper: (file: File, projectId?: number) => {
-    const form = new FormData();
-    form.append('file', file);
-    const url = projectId ? `${BASE}/projects/${projectId}/papers` : `${BASE}/papers`;
-    return axios.post<Paper>(url, form).then(r => r.data);
-  },
-  updatePaper: (id: number, data: Partial<Paper>) =>
-    axios.patch<Paper>(`${BASE}/papers/${id}`, data).then(r => r.data),
-  deletePaper: (id: number) => axios.delete(`${BASE}/papers/${id}`),
-  fetchPaperMetadata: (id: number, doi?: string, arxiv_id?: string, title?: string) =>
-    axios.post<PaperMetadataResult>(`${BASE}/papers/${id}/fetch-metadata`, { doi, arxiv_id, title }).then(r => r.data),
-  addPaperToProject: (paperId: number, projectId: number) =>
-    axios.post(`${BASE}/papers/${paperId}/projects/${projectId}`),
-  removePaperFromProject: (paperId: number, projectId: number) =>
-    axios.delete(`${BASE}/papers/${paperId}/projects/${projectId}`),
-  getPaperPdfUrl: (id: number) => `${BASE}/papers/${id}/pdf`,
+  embedText: (text: string): Promise<{ embedding: number[] }> =>
+    embedTextService(text).then(embedding => ({ embedding })),
 
-  // Passages
-  listPassages: (paperId: number) =>
-    axios.get<Passage[]>(`${BASE}/papers/${paperId}/passages`).then(r => r.data),
-  createPassage: (paperId: number, data: { page: number; text: string; rects: Rect[]; color?: string }) =>
-    axios.post<Passage>(`${BASE}/papers/${paperId}/passages`, data).then(r => r.data),
-  updatePassage: (id: number, data: { color?: string }) =>
-    axios.patch<Passage>(`${BASE}/passages/${id}`, data).then(r => r.data),
-  deletePassage: (id: number) => axios.delete(`${BASE}/passages/${id}`),
-  getSimilarPassages: (id: number, limit = 10, projectId?: number) =>
-    axios.get<SimilarPassage[]>(`${BASE}/passages/${id}/similar`, { params: { limit, project_id: projectId } }).then(r => r.data),
-  trainSimilarity: (projectId: number) =>
-    axios.post<{ message: string }>(`${BASE}/projects/${projectId}/train-similarity`).then(r => r.data),
-  getPassageLinks: (id: number) =>
-    axios.get<PassageLink[]>(`${BASE}/passages/${id}/links`).then(r => r.data),
-  getPaperLinks: (paperId: number) =>
-    axios.get<PassageLinkDetail[]>(`${BASE}/papers/${paperId}/links`).then(r => r.data),
-  createPassageLink: (id: number, otherId: number) =>
-    axios.post<PassageLink>(`${BASE}/passages/${id}/links/${otherId}`).then(r => r.data),
-  deletePassageLink: (id: number, otherId: number) =>
-    axios.delete(`${BASE}/passages/${id}/links/${otherId}`),
+  qa: (
+    query: string,
+    paper_title: string,
+    chunks: Array<{ text: string; page: number }>,
+  ): Promise<{ answer: string | null }> =>
+    answerQuestion(query, paper_title, chunks).then(answer => ({ answer })),
 
-  // Tags
-  listTags: (projectId: number) =>
-    axios.get<Tag[]>(`${BASE}/projects/${projectId}/tags`).then(r => r.data),
-  createTag: (name: string, type: 'content' | 'paper', projectId?: number) =>
-    axios.post<Tag>(`${BASE}/tags`, { name, type, project_id: projectId }).then(r => r.data),
-  updateTag: (id: number, name: string) =>
-    axios.patch<Tag>(`${BASE}/tags/${id}`, { name }).then(r => r.data),
-  deleteTag: (id: number) => axios.delete(`${BASE}/tags/${id}`),
-  addPassageTag: (passageId: number, tagId: number) =>
-    axios.post(`${BASE}/passages/${passageId}/tags/${tagId}`),
-  removePassageTag: (passageId: number, tagId: number) =>
-    axios.delete(`${BASE}/passages/${passageId}/tags/${tagId}`),
-  getTagPassages: (tagId: number) =>
-    axios.get<Passage[]>(`${BASE}/tags/${tagId}/passages`).then(r => r.data),
-
-  // Notes
-  createNote: (data: { type: 'passage' | 'tag'; content: string; passage_ids?: number[]; tag_ids?: number[] }) =>
-    axios.post<Note>(`${BASE}/notes`, data).then(r => r.data),
-  getPassageNotes: (passageId: number) =>
-    axios.get<Note[]>(`${BASE}/passages/${passageId}/notes`).then(r => r.data),
-  getTagNotes: (tagId: number) =>
-    axios.get<Note[]>(`${BASE}/tags/${tagId}/notes`).then(r => r.data),
-  updateNote: (id: number, content: string) =>
-    axios.patch<Note>(`${BASE}/notes/${id}`, { content }).then(r => r.data),
-  deleteNote: (id: number) => axios.delete(`${BASE}/notes/${id}`),
-
-  // Q&A
-  searchPaper: (paperId: number, query: string, limit = 10) =>
-    axios.post<SearchResponse>(`${BASE}/papers/${paperId}/search`, { query, limit }).then(r => r.data),
+  fetchMetadata: (doi?: string, arxiv_id?: string, title?: string): Promise<PaperMetadataResult> =>
+    fetchPaperMetadata(doi, arxiv_id, title),
 };
