@@ -226,6 +226,9 @@ export function ContextPanel({
     setEditingNoteId(null);
     setEditNoteContent('');
     onNotesChanged?.();
+    api.embedText(updated.content).then(({ embedding }) =>
+      ws.updateNoteEmbedding(updated.id, paperId, embedding)
+    ).catch(() => {});
   };
 
   const handleSpreadNote = async (linkedNote: LinkedNote) => {
@@ -259,6 +262,9 @@ export function ContextPanel({
     setNotes(prev => [note, ...prev]);
     setNewNote('');
     onNotesChanged?.();
+    api.embedText(note.content).then(({ embedding }) =>
+      ws.updateNoteEmbedding(note.id, paperId, embedding)
+    ).catch(() => {});
   };
 
   const handleDeleteNote = async (id: number) => {

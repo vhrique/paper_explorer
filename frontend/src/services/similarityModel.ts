@@ -143,6 +143,7 @@ export async function trainAndSave(
   projectId: number,
   passageEmbeddings: Array<{ id: number; embedding: number[] }>,
   links: Array<{ passage_id_1: number; passage_id_2: number }>,
+  notePairs: Array<{ embedding: number[]; passageIds: number[] }> = [],
   epochs = 50,
   lr = 0.001,
 ): Promise<boolean> {
@@ -159,30 +160,61 @@ export async function trainAndSave(
 
   const validLinks = links.filter(l => idToEmb.has(l.passage_id_1) && idToEmb.has(l.passage_id_2));
 
-  if (validLinks.length === 0) {
+  // Build all positive pairs and the linked-pair set (for negative exclusion).
+  const posQParts: Float32Array[] = [];
+  const posKParts: Float32Array[] = [];
+  const linkedSet = new Set<string>();
+
+  // Manual passage links (bidirectional)
+  for (const { passage_id_1: id1, passage_id_2: id2 } of validLinks) {
+    posQParts.push(idToEmb.get(id1)!, idToEmb.get(id2)!);
+    posKParts.push(idToEmb.get(id2)!, idToEmb.get(id1)!);
+    linkedSet.add(`${Math.min(id1, id2)}_${Math.max(id1, id2)}`);
+  }
+
+  // Note → passage pairs: the note embedding and its annotated passage embeddings
+  // are positive pairs (bidirectional), since the user wrote the note specifically
+  // about that passage. Notes spanning multiple passages also make those passages
+  // positive pairs with each other.
+  for (const { embedding: noteEmb, passageIds } of notePairs) {
+    if (noteEmb.length !== dim) continue;
+    const noteF32 = new Float32Array(noteEmb);
+    for (const pid of passageIds) {
+      const passEmb = idToEmb.get(pid);
+      if (!passEmb) continue;
+      posQParts.push(noteF32, passEmb);
+      posKParts.push(passEmb, noteF32);
+    }
+    for (let i = 0; i < passageIds.length; i++) {
+      for (let j = i + 1; j < passageIds.length; j++) {
+        const e1 = idToEmb.get(passageIds[i]);
+        const e2 = idToEmb.get(passageIds[j]);
+        if (!e1 || !e2) continue;
+        const key = `${Math.min(passageIds[i], passageIds[j])}_${Math.max(passageIds[i], passageIds[j])}`;
+        if (!linkedSet.has(key)) {
+          posQParts.push(e1, e2);
+          posKParts.push(e2, e1);
+          linkedSet.add(key);
+        }
+      }
+    }
+  }
+
+  if (posQParts.length === 0) {
     try { await workspace.deleteProjectModel(projectId); } catch { /* ok */ }
     clearModel(projectId);
     return true;
   }
 
-  // Build positive pairs (bidirectional)
-  const nPos = validLinks.length * 2;
+  const nPos = posQParts.length;
   const posQArr = new Float32Array(nPos * dim);
   const posKArr = new Float32Array(nPos * dim);
-  let pIdx = 0;
-  for (const { passage_id_1: id1, passage_id_2: id2 } of validLinks) {
-    posQArr.set(idToEmb.get(id1)!, pIdx * dim);
-    posKArr.set(idToEmb.get(id2)!, pIdx * dim);
-    pIdx++;
-    posQArr.set(idToEmb.get(id2)!, pIdx * dim);
-    posKArr.set(idToEmb.get(id1)!, pIdx * dim);
-    pIdx++;
+  for (let i = 0; i < nPos; i++) {
+    posQArr.set(posQParts[i], i * dim);
+    posKArr.set(posKParts[i], i * dim);
   }
 
   // Build negative pairs from all non-linked passage pairs
-  const linkedSet = new Set(validLinks.map(
-    ({ passage_id_1: a, passage_id_2: b }) => `${Math.min(a, b)}_${Math.max(a, b)}`,
-  ));
   const passageIds = [...idToEmb.keys()];
   const negQParts: Float32Array[] = [];
   const negKParts: Float32Array[] = [];
@@ -309,17 +341,21 @@ export async function triggerModelTraining(projectId: number): Promise<TrainingR
       allEmbeddings.push(...embs);
     }
 
-    const links = await workspace.getAllPassageLinks();
+    const [links, notePairs] = await Promise.all([
+      workspace.getAllPassageLinks(),
+      workspace.getNoteEmbeddingsForProject(projectId),
+    ]);
     const validLinks = links.filter(
       l => allEmbeddings.some(e => e.id === l.passage_id_1) &&
            allEmbeddings.some(e => e.id === l.passage_id_2),
     );
 
-    if (links.length === 0) return 'no-links';
+    const hasSignal = links.length > 0 || notePairs.length > 0;
+    if (!hasSignal) return 'no-links';
     if (allEmbeddings.length === 0) return 'no-embeddings';
-    if (validLinks.length === 0) return 'no-embeddings'; // links exist but no embeddings on them
+    if (validLinks.length === 0 && notePairs.length === 0) return 'no-embeddings';
 
-    const ok = await trainAndSave(projectId, allEmbeddings, links);
+    const ok = await trainAndSave(projectId, allEmbeddings, links, notePairs);
     // trainAndSave returns true with no model when links = 0 (cleared), true when trained
     if (!ok) return 'error';
     return validLinks.length > 0 ? 'trained' : 'cleared';
