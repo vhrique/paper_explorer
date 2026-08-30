@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
-import { api, type Passage, type Rect, type Tag } from '../api';
-import * as ws from '../storage/workspace';
-import { X, Minus, Plus, Tag as TagIcon, Trash2, Link2, Unlink, Sparkles, StickyNote } from 'lucide-react';
+import {
+  Minus, Plus, Trash2, MessageSquarePlus, StickyNote, TextCursor, SquareDashed, X,
+} from 'lucide-react';
+import type { Annotation, QuoteContext, Rect } from '../api';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.js',
@@ -13,335 +14,322 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 const HIGHLIGHT_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#FCA5A5'];
 
-interface PendingSelection {
+type Mode = 'select' | 'region' | 'note';
+
+interface PendingText {
   text: string;
   rects: Rect[];
   page: number;
-  toolbarY: number;
-  toolbarX: number;
+  x: number;
+  y: number;
 }
 
-interface ConnectedPassage {
+interface RegionMenu {
   page: number;
-  rects: Rect[];
-  highlight?: boolean; // render a visual highlight (for the second panel)
-  passageId?: number;
+  rect: Rect;
+  x: number;
+  y: number;
+}
+
+interface CommentEditor {
+  id: string | null; // null => a not-yet-created note
+  page: number;
+  rect: Rect;
+  value: string;
+  x: number;
+  y: number;
 }
 
 interface Props {
-  paperId: number;
   pdfUrl: string;
-  projectId: number;
-  passages: Passage[];
-  selectedPassage: Passage | null;
-  onPassageCreated: (passage: Passage) => void;
-  onPassageClick: (passage: Passage) => void;
-  onPassageDeleted: (id: number) => void;
-  onPassageUpdated: (passage: Passage) => void;
-  jumpToPage?: number;
-  jumpToPassage?: { page: number; rect: Rect };
-  connectedPassages?: ConnectedPassage[];
-  onConnectedRectsChange?: (rects: { passageId: number; rect: DOMRect }[]) => void;
-  onOffscreenRectsChange?: (rects: DOMRect[]) => void;
-  // Linking
-  onLinkStart?: (passage: Passage, sourceRect: DOMRect | null) => void;
-  linkingTarget?: boolean;
-  onLinkTarget?: (passage: Passage) => void;
-  linkedPassages?: { page: number; rects: Rect[]; passageId: number }[];
-  onLinkedRectsChange?: (rects: { passageId: number; rect: DOMRect }[]) => void;
-  onUnlink?: (passageId: number) => void;
-  onFindSimilar?: (passage: Passage) => void;
-  onPassageHover?: (passageId: number | null) => void;
-  notesByPassageId?: Record<number, { id: number; content: string }[]>;
-  onNoteClick?: (passage: Passage) => void;
+  annotations: Annotation[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  onCreateHighlight: (a: { page: number; rects: Rect[]; color: string }) => void;
+  onCreateRegion: (a: { page: number; rect: Rect; color: string }) => void;
+  onCreateNote: (a: { page: number; rect: Rect; color: string; comment: string }) => void;
+  onUpdateComment: (id: string, comment: string) => void;
+  onDelete: (id: string) => void;
+  onAskAbout: (q: QuoteContext) => void;
+  regionText: (page: number, rect: Rect) => Promise<string>;
+  jumpTarget?: { page: number; rect?: Rect } | null;
+  flash?: { page: number; rects: Rect[] } | null;
 }
 
-export function PDFPanel({ paperId, pdfUrl, projectId, passages, selectedPassage, onPassageCreated, onPassageClick, onPassageDeleted, onPassageUpdated, jumpToPage, jumpToPassage, connectedPassages, onConnectedRectsChange, onOffscreenRectsChange, onLinkStart, linkingTarget, onLinkTarget, linkedPassages, onLinkedRectsChange, onUnlink, onFindSimilar, onPassageHover, notesByPassageId, onNoteClick }: Props) {
+function rectFromPoints(ax: number, ay: number, bx: number, by: number): Rect {
+  return {
+    x: Math.min(ax, bx),
+    y: Math.min(ay, by),
+    width: Math.abs(bx - ax),
+    height: Math.abs(by - ay),
+  };
+}
+
+function hitTest(anns: Annotation[], mx: number, my: number): Annotation | undefined {
+  return anns.find(a => a.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height));
+}
+
+export function PDFPanel({
+  pdfUrl, annotations, selectedId, onSelect,
+  onCreateHighlight, onCreateRegion, onCreateNote, onUpdateComment, onDelete,
+  onAskAbout, regionText, jumpTarget, flash,
+}: Props) {
   const [numPages, setNumPages] = useState(0);
   const [scale, setScale] = useState(1.2);
-  const [pending, setPending] = useState<PendingSelection | null>(null);
+  const [mode, setMode] = useState<Mode>('select');
   const [selectedColor, setSelectedColor] = useState(HIGHLIGHT_COLORS[0]);
+  const [pendingText, setPendingText] = useState<PendingText | null>(null);
+  const [regionDraft, setRegionDraft] = useState<{ page: number; rect: Rect } | null>(null);
+  const [regionMenu, setRegionMenu] = useState<RegionMenu | null>(null);
+  const [editor, setEditor] = useState<CommentEditor | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const [tags, setTags] = useState<Tag[]>([]);
-  const [hoveredPassageId, setHoveredPassageId] = useState<number | null>(null);
-  const [taggingPassageId, setTaggingPassageId] = useState<number | null>(null);
-  const [notesPopupPassageId, setNotesPopupPassageId] = useState<number | null>(null);
-  const [newTagName, setNewTagName] = useState('');
-  const [addingTag, setAddingTag] = useState(false);
+  const dragRef = useRef<{ page: number; startX: number; startY: number } | null>(null);
   const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Intercept Ctrl + Scroll Wheel (or Trackpad Pinch-to-Zoom) to zoom only the PDF document
+
+  const clearHoverSoon = () => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+    hoverTimeout.current = setTimeout(() => setHoveredId(null), 250);
+  };
+  const keepHover = (id: string) => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+    setHoveredId(prev => (prev === id ? prev : id));
+  };
+
+  const byPage = useMemo(() => {
+    const m: Record<number, Annotation[]> = {};
+    for (const a of annotations) (m[a.page] ??= []).push(a);
+    return m;
+  }, [annotations]);
+
+  // Ctrl+wheel / pinch zoom, PDF only
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) {
-        e.preventDefault();
-        setScale(s => {
-          const step = 0.08;
-          const direction = e.deltaY < 0 ? 1 : -1;
-          const next = s + direction * step;
-          return Math.min(2.5, Math.max(0.6, next));
-        });
-      }
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setScale(s => Math.min(2.5, Math.max(0.6, s + (e.deltaY < 0 ? 0.08 : -0.08))));
     };
-
-    el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => {
-      el.removeEventListener('wheel', handleWheel);
-    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
+  // Jump to a page / rect
   useEffect(() => {
-    if (!onConnectedRectsChange && !onOffscreenRectsChange) return;
-    const compute = () => {
-      if (!connectedPassages?.length) {
-        onConnectedRectsChange?.([]);
-        onOffscreenRectsChange?.([]);
-        return;
-      }
-      const cb = containerRef.current?.getBoundingClientRect();
-      if (!cb) { onConnectedRectsChange?.([]); onOffscreenRectsChange?.([]); return; }
-      const visible: { passageId: number; rect: DOMRect }[] = [];
-      for (const cp of connectedPassages) {
-        const pageEl = pageRefs.current[cp.page];
-        if (!pageEl) continue;
-        const pb = pageEl.getBoundingClientRect();
-        const r = cp.rects[0];
-        const isNormalized = r && r.x <= 2 && r.y <= 2;
-        const midY = isNormalized
-          ? pb.top + (r.y + r.height / 2) * pb.height
-          : pb.top + pb.height * 0.1;
-        const rawLeft = isNormalized ? pb.left + r.x * pb.width : pb.left + pb.width * 0.1;
-        const rawRight = isNormalized ? rawLeft + r.width * pb.width : pb.left + pb.width * 0.9;
-        const clampedLeft = Math.max(rawLeft, cb.left);
-        const clampedRight = Math.min(rawRight, cb.right);
-        if (clampedRight > clampedLeft) {
-          visible.push({
-            passageId: cp.passageId ?? 0,
-            rect: new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0)
-          });
-        }
-      }
-      onConnectedRectsChange?.(visible);
-      onOffscreenRectsChange?.([]);
-    };
-    const raf = requestAnimationFrame(() => requestAnimationFrame(compute));
-    const el = containerRef.current;
-    el?.addEventListener('scroll', compute);
-    window.addEventListener('resize', compute);
-    return () => {
-      cancelAnimationFrame(raf);
-      el?.removeEventListener('scroll', compute);
-      window.removeEventListener('resize', compute);
-    };
-  }, [connectedPassages, scale, numPages, onConnectedRectsChange, onOffscreenRectsChange]);
-
-  useEffect(() => {
-    if (!onLinkedRectsChange) return;
-    if (!linkedPassages?.length) { onLinkedRectsChange([]); return; }
-    const compute = () => {
-      const cb = containerRef.current?.getBoundingClientRect();
-      if (!cb) { onLinkedRectsChange([]); return; }
-      const result: { passageId: number; rect: DOMRect }[] = [];
-      for (const lp of linkedPassages) {
-        const pageEl = pageRefs.current[lp.page];
-        if (!pageEl) continue;
-        const pb = pageEl.getBoundingClientRect();
-        const r = lp.rects[0];
-        if (!r) continue;
-        const midY = pb.top + (r.y + r.height / 2) * pb.height;
-        const rawLeft = pb.left + r.x * pb.width;
-        const rawRight = rawLeft + r.width * pb.width;
-        const clampedLeft = Math.max(rawLeft, cb.left);
-        const clampedRight = Math.min(rawRight, cb.right);
-        if (clampedRight > clampedLeft) {
-          result.push({ passageId: lp.passageId, rect: new DOMRect(clampedLeft, midY, clampedRight - clampedLeft, 0) });
-        }
-      }
-      onLinkedRectsChange(result);
-    };
-    const raf = requestAnimationFrame(() => requestAnimationFrame(compute));
-    const el = containerRef.current;
-    el?.addEventListener('scroll', compute);
-    window.addEventListener('resize', compute);
-    return () => {
-      cancelAnimationFrame(raf);
-      el?.removeEventListener('scroll', compute);
-      window.removeEventListener('resize', compute);
-    };
-  }, [linkedPassages, scale, numPages, onLinkedRectsChange]);
-
-  useEffect(() => {
-    ws.getTags(projectId).then(setTags);
-  }, [projectId]);
-
-  useEffect(() => {
-    if (jumpToPage == null) return;
-    const el = pageRefs.current[jumpToPage];
-    if (el) el.scrollIntoView({ behavior: 'instant', block: 'start' });
-  }, [jumpToPage, numPages]);
-
-  useEffect(() => {
-    if (!jumpToPassage) return;
-    const pageEl = pageRefs.current[jumpToPassage.page];
+    if (!jumpTarget) return;
+    const pageEl = pageRefs.current[jumpTarget.page];
     const container = containerRef.current;
     if (!pageEl || !container) return;
-    const containerRect = container.getBoundingClientRect();
-    const pageRect = pageEl.getBoundingClientRect();
-    const r = jumpToPassage.rect;
-    const passageMidY = pageRect.top + (r.y + r.height / 2) * pageRect.height;
-    const targetScrollTop = container.scrollTop + passageMidY - containerRect.top - containerRect.height / 2;
-    container.scrollTo({ top: targetScrollTop, behavior: 'instant' });
-  }, [jumpToPassage, numPages]);
+    const cr = container.getBoundingClientRect();
+    const pr = pageEl.getBoundingClientRect();
+    const midFrac = jumpTarget.rect ? jumpTarget.rect.y + jumpTarget.rect.height / 2 : 0.1;
+    const midY = pr.top + midFrac * pr.height;
+    container.scrollTo({ top: container.scrollTop + midY - cr.top - cr.height / 2, behavior: 'instant' });
+  }, [jumpTarget, numPages]);
 
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
-    // Don't capture if clicking on the toolbar itself
-    if ((e.target as HTMLElement).closest('[data-highlight-toolbar]')) return;
+  const pageMetrics = (pageIndex: number, clientX: number, clientY: number) => {
+    const el = pageRefs.current[pageIndex];
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { b, mx: (clientX - b.left) / b.width, my: (clientY - b.top) / b.height };
+  };
 
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) {
-      setPending(null);
+  // ---- Text selection -> highlight / ask ----
+  const handleTextMouseUp = useCallback((e: React.MouseEvent) => {
+    if (mode !== 'select') return;
+    if ((e.target as HTMLElement).closest('[data-overlay-ui]')) return;
+
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) {
+      setPendingText(null);
       return;
     }
-
-    const text = selection.toString().trim();
-    if (text.length < 5) {
-      setPending(null);
+    const text = sel.toString().trim();
+    if (text.length < 3) {
+      setPendingText(null);
       return;
     }
+    const clientRects = Array.from(sel.getRangeAt(0).getClientRects());
 
-    const range = selection.getRangeAt(0);
-    const clientRects = Array.from(range.getClientRects());
-
-    // Find which page this selection is in
     let pageIndex = -1;
     for (let i = 0; i < pageRefs.current.length; i++) {
       const el = pageRefs.current[i];
       if (!el) continue;
-      const bounds = el.getBoundingClientRect();
-      if (clientRects.some(r => r.top >= bounds.top && r.bottom <= bounds.bottom + 10)) {
+      const bb = el.getBoundingClientRect();
+      if (clientRects.some(r => r.top >= bb.top - 4 && r.bottom <= bb.bottom + 10)) {
         pageIndex = i;
         break;
       }
     }
     if (pageIndex === -1) return;
-
-    const pageEl = pageRefs.current[pageIndex]!;
-    const pageBounds = pageEl.getBoundingClientRect();
-
-    const rects: Rect[] = clientRects
+    const pb = pageRefs.current[pageIndex]!.getBoundingClientRect();
+    const rects = clientRects
       .filter(r => r.width > 1 && r.height > 1)
       .map(r => ({
-        x: (r.left - pageBounds.left) / pageBounds.width,
-        y: (r.top - pageBounds.top) / pageBounds.height,
-        width: r.width / pageBounds.width,
-        height: r.height / pageBounds.height,
+        x: (r.left - pb.left) / pb.width,
+        y: (r.top - pb.top) / pb.height,
+        width: r.width / pb.width,
+        height: r.height / pb.height,
       }));
+    if (!rects.length) return;
 
-    if (rects.length === 0) return;
-
-    // Position toolbar near the selection
-    const containerBounds = containerRef.current!.getBoundingClientRect();
-    const lastRect = clientRects[clientRects.length - 1];
-
-    setPending({
+    const cb = containerRef.current!.getBoundingClientRect();
+    const last = clientRects[clientRects.length - 1];
+    setPendingText({
       text,
       rects,
       page: pageIndex,
-      toolbarY: lastRect.bottom - containerBounds.top + containerRef.current!.scrollTop + 8,
-      toolbarX: Math.min(
-        lastRect.left - containerBounds.left,
-        containerBounds.width - 220
-      ),
+      y: last.bottom - cb.top + containerRef.current!.scrollTop + 8,
+      x: Math.min(last.left - cb.left, cb.width - 240),
     });
-  }, []);
+  }, [mode]);
 
-  const handleCreatePassage = async () => {
-    if (!pending) return;
-    const passage = await ws.createPassage(paperId, {
-      page: pending.page,
-      text: pending.text,
-      rects: pending.rects,
-      color: selectedColor,
-    });
-    onPassageCreated(passage);
-    setPending(null);
+  const commitHighlight = () => {
+    if (!pendingText) return;
+    onCreateHighlight({ page: pendingText.page, rects: pendingText.rects, color: selectedColor });
+    setPendingText(null);
     window.getSelection()?.removeAllRanges();
-    // Embed in background so it's available for future similarity search
-    api.embedText(pending.text).then(({ embedding }) =>
-      ws.updatePassageEmbedding(passage.id, paperId, embedding)
-    ).catch(() => {});
   };
 
-  const handlePageMouseMove = (e: React.MouseEvent<HTMLDivElement>, pageIndex: number) => {
-    if (taggingPassageId !== null || notesPopupPassageId !== null) return;
-    if ((e.target as HTMLElement).closest('[data-passage-toolbar]')) {
-      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+  const askAboutText = () => {
+    if (!pendingText) return;
+    onAskAbout({ page: pendingText.page, rects: pendingText.rects, text: pendingText.text, kind: 'text' });
+    setPendingText(null);
+    window.getSelection()?.removeAllRanges();
+  };
+
+  // ---- Region drag ----
+  const onPagePointerDown = (e: React.PointerEvent, pageIndex: number) => {
+    if (mode !== 'region') return;
+    const m = pageMetrics(pageIndex, e.clientX, e.clientY);
+    if (!m) return;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    dragRef.current = { page: pageIndex, startX: m.mx, startY: m.my };
+    setRegionMenu(null);
+    setRegionDraft({ page: pageIndex, rect: { x: m.mx, y: m.my, width: 0, height: 0 } });
+  };
+
+  const onPagePointerMove = (e: React.PointerEvent, pageIndex: number) => {
+    if (mode === 'select') {
+      if ((e.target as HTMLElement).closest('[data-overlay-ui]')) return;
+      const m = pageMetrics(pageIndex, e.clientX, e.clientY);
+      if (!m) return;
+      const hit = hitTest(byPage[pageIndex] ?? [], m.mx, m.my);
+      if (hit) keepHover(hit.id);
+      else clearHoverSoon();
       return;
     }
-    const el = pageRefs.current[pageIndex];
-    if (!el) return;
-    const bounds = el.getBoundingClientRect();
-    const mx = (e.clientX - bounds.left) / bounds.width;
-    const my = (e.clientY - bounds.top) / bounds.height;
-    const hit = (passagesByPage[pageIndex] ?? []).find(p =>
-      p.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)
-    );
-    if (hit) {
-      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
-      if (hoveredPassageId !== hit.id) {
-        setHoveredPassageId(hit.id);
-        onPassageHover?.(hit.id);
-      }
-    } else {
-      if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
-      hoverTimeout.current = setTimeout(() => {
-        setHoveredPassageId(null);
-        onPassageHover?.(null);
-      }, 300);
+    if (mode !== 'region' || !dragRef.current || dragRef.current.page !== pageIndex) return;
+    const m = pageMetrics(pageIndex, e.clientX, e.clientY);
+    if (!m) return;
+    setRegionDraft({
+      page: pageIndex,
+      rect: rectFromPoints(dragRef.current.startX, dragRef.current.startY, m.mx, m.my),
+    });
+  };
+
+  const onPagePointerUp = (e: React.PointerEvent, pageIndex: number) => {
+    if (mode !== 'region' || !dragRef.current) return;
+    const drag = dragRef.current;
+    dragRef.current = null;
+    const m = pageMetrics(pageIndex, e.clientX, e.clientY);
+    setRegionDraft(null);
+    if (!m) return;
+    const rect = rectFromPoints(drag.startX, drag.startY, m.mx, m.my);
+    if (rect.width < 0.01 || rect.height < 0.01) return;
+    const cb = containerRef.current!.getBoundingClientRect();
+    setRegionMenu({
+      page: pageIndex,
+      rect,
+      x: Math.min(e.clientX - cb.left, cb.width - 240),
+      y: e.clientY - cb.top + containerRef.current!.scrollTop + 8,
+    });
+  };
+
+  const commitRegion = () => {
+    if (!regionMenu) return;
+    onCreateRegion({ page: regionMenu.page, rect: regionMenu.rect, color: selectedColor });
+    setRegionMenu(null);
+    setMode('select');
+  };
+
+  const askAboutRegion = async () => {
+    if (!regionMenu) return;
+    const { page, rect } = regionMenu;
+    setRegionMenu(null);
+    setMode('select');
+    const text = await regionText(page, rect);
+    onAskAbout({ page, rects: [rect], text, kind: 'region' });
+  };
+
+  // ---- Note placement + comment editing ----
+  const handlePageClick = (e: React.MouseEvent, pageIndex: number) => {
+    if ((e.target as HTMLElement).closest('[data-overlay-ui]')) return;
+    const m = pageMetrics(pageIndex, e.clientX, e.clientY);
+    if (!m) return;
+
+    if (mode === 'note') {
+      const cb = containerRef.current!.getBoundingClientRect();
+      setEditor({
+        id: null,
+        page: pageIndex,
+        rect: { x: m.mx, y: m.my, width: 0.02, height: 0.02 },
+        value: '',
+        x: Math.min(e.clientX - cb.left, cb.width - 260),
+        y: e.clientY - cb.top + containerRef.current!.scrollTop + 8,
+      });
+      return;
+    }
+    if (mode === 'select') {
+      const hit = hitTest(byPage[pageIndex] ?? [], m.mx, m.my);
+      onSelect(hit?.id ?? null);
     }
   };
 
-  const handleDeletePassage = async (id: number) => {
-    const passage = passages.find(p => p.id === id);
-    if (!passage) return;
-    await ws.deletePassage(id, paperId);
-    onPassageDeleted(id);
-    setTaggingPassageId(null);
+  const openCommentEditor = (a: Annotation) => {
+    const pageEl = pageRefs.current[a.page];
+    const cb = containerRef.current?.getBoundingClientRect();
+    if (!pageEl || !cb) return;
+    const pr = pageEl.getBoundingClientRect();
+    const r = a.rects[0];
+    setEditor({
+      id: a.id,
+      page: a.page,
+      rect: r,
+      value: a.comment,
+      x: Math.min(pr.left - cb.left + r.x * pr.width, cb.width - 260),
+      y: (pr.top - cb.top) + (r.y + r.height) * pr.height + containerRef.current!.scrollTop + 6,
+    });
   };
 
-  const handleAddTag = async (tag: Tag, passage: Passage) => {
-    await ws.addPassageTag(passage.id, tag.id, passage.paper_id);
-    onPassageUpdated({ ...passage, tags: [...passage.tags, tag] });
-    setTaggingPassageId(null);
+  const saveEditor = () => {
+    if (!editor) return;
+    if (editor.id) {
+      onUpdateComment(editor.id, editor.value.trim());
+    } else if (editor.value.trim()) {
+      onCreateNote({ page: editor.page, rect: editor.rect, color: selectedColor, comment: editor.value.trim() });
+      setMode('select');
+    }
+    setEditor(null);
   };
 
-  const handleRemoveTag = async (tagId: number, passage: Passage) => {
-    await ws.removePassageTag(passage.id, tagId, passage.paper_id);
-    onPassageUpdated({ ...passage, tags: passage.tags.filter(t => t.id !== tagId) });
-    const stillUsed = passages.some(p => p.id !== passage.id && p.tags.some(t => t.id === tagId));
-    if (!stillUsed) setTags(prev => prev.filter(t => t.id !== tagId));
-  };
-
-  const handleCreateTag = async (passage: Passage) => {
-    if (!newTagName.trim()) return;
-    const tag = await ws.createTag(newTagName.trim(), 'content', projectId);
-    setTags(prev => [...prev, tag]);
-    setNewTagName('');
-    setAddingTag(false);
-    await handleAddTag(tag, passage);
-  };
-
-  const passagesByPage = passages.reduce<Record<number, Passage[]>>((acc, p) => {
-    (acc[p.page] ??= []).push(p);
-    return acc;
-  }, {});
+  const modeBtn = (m: Mode, label: string, Icon: typeof TextCursor) => (
+    <button
+      onClick={() => { setMode(m); setPendingText(null); setRegionMenu(null); }}
+      className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors ${
+        mode === m ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+      }`}
+      title={label}
+    >
+      <Icon size={13} /> {label}
+    </button>
+  );
 
   return (
     <div className="relative flex flex-col h-full bg-gray-100">
-      {/* Toolbar */}
       <div className="relative z-20 flex items-center justify-between px-4 py-2 bg-white border-b border-gray-200 flex-shrink-0">
         <div className="flex items-center gap-2">
           <button onClick={() => setScale(s => Math.max(0.6, s - 0.2))} className="p-1 rounded hover:bg-gray-100">
@@ -352,339 +340,267 @@ export function PDFPanel({ paperId, pdfUrl, projectId, passages, selectedPassage
             <Plus size={14} />
           </button>
         </div>
-        <p className="text-xs text-gray-400">{numPages} pages · Select text to highlight</p>
+        <div className="flex items-center gap-1">
+          {modeBtn('select', 'Select', TextCursor)}
+          {modeBtn('region', 'Region', SquareDashed)}
+          {modeBtn('note', 'Note', StickyNote)}
+        </div>
+        <p className="text-xs text-gray-400 w-16 text-right">{numPages} pp</p>
       </div>
 
-      {/* PDF + highlights */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-y-auto px-4 py-4 relative select-text"
-        style={linkingTarget ? { cursor: 'crosshair' } : undefined}
-        onMouseUp={handleMouseUp}
+        className="flex-1 overflow-y-auto px-4 py-4 relative"
+        style={mode === 'select' ? { userSelect: 'text' } : { userSelect: 'none', cursor: 'crosshair' }}
+        onMouseUp={handleTextMouseUp}
       >
         <Document
           file={pdfUrl}
           onLoadSuccess={({ numPages }) => setNumPages(numPages)}
           className="flex flex-col items-center gap-4"
         >
-          {Array.from({ length: numPages }, (_, i) => (
-            <div
-              key={i}
-              ref={el => { pageRefs.current[i] = el; }}
-              className="relative shadow-lg"
-              onMouseMove={e => handlePageMouseMove(e, i)}
-              onMouseLeave={() => { if (taggingPassageId === null && notesPopupPassageId === null) { if (hoverTimeout.current) clearTimeout(hoverTimeout.current); hoverTimeout.current = setTimeout(() => { setHoveredPassageId(null); onPassageHover?.(null); }, 300); } }}
-              onClick={e => {
-                const el = pageRefs.current[i];
-                if (!el) return;
-                const bounds = el.getBoundingClientRect();
-                const mx = (e.clientX - bounds.left) / bounds.width;
-                const my = (e.clientY - bounds.top) / bounds.height;
-                const hit = (passagesByPage[i] ?? []).find(p =>
-                  p.rects.some(r => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)
-                );
-                if (hit) {
-                  if (linkingTarget && onLinkTarget) onLinkTarget(hit);
-                  else onPassageClick(hit);
-                }
-              }}
-            >
-              <Page
-                pageIndex={i}
-                scale={scale}
-                renderTextLayer
-                renderAnnotationLayer={false}
-              />
+          {Array.from({ length: numPages }, (_, i) => {
+            const anns = byPage[i] ?? [];
+            return (
+              <div
+                key={i}
+                ref={el => { pageRefs.current[i] = el; }}
+                className="relative shadow-lg"
+                onPointerDown={e => onPagePointerDown(e, i)}
+                onPointerMove={e => onPagePointerMove(e, i)}
+                onPointerUp={e => onPagePointerUp(e, i)}
+                onMouseLeave={clearHoverSoon}
+                onClick={e => handlePageClick(e, i)}
+              >
+                <Page pageIndex={i} scale={scale} renderTextLayer renderAnnotationLayer={false} />
 
-              {/* Highlight overlay */}
-              <div className="absolute inset-0 pointer-events-none">
-                {(passagesByPage[i] ?? []).map(passage => {
-                  const isTagging = taggingPassageId === passage.id;
-                  const firstRect = passage.rects[0];
-                  const passageTagIds = new Set(passage.tags.map(t => t.id));
-                  const availableTags = tags.filter(t => !passageTagIds.has(t.id) && t.type === 'content');
-                  const isHovered = hoveredPassageId === passage.id;
-                  const isLinked = linkedPassages?.some(lp => lp.passageId === passage.id) ?? false;
-                  const passageNotes = notesByPassageId?.[passage.id] ?? [];
-                  const hasNotes = passageNotes.length > 0;
-                  const isNotesOpen = notesPopupPassageId === passage.id;
-                  return (
-                    <div key={passage.id} style={{ position: 'static' }}>
-                      {passage.rects.map((rect, ri) => (
-                        <div
-                          key={ri}
-                          className="absolute pointer-events-none"
-                          style={{
-                            left: `${rect.x * 100}%`,
-                            top: `${rect.y * 100}%`,
-                            width: `${rect.width * 100}%`,
-                            height: `${rect.height * 100}%`,
-                            backgroundColor: passage.color,
-                            opacity: selectedPassage?.id === passage.id ? 0.6 : 0.35,
-                            outline: selectedPassage?.id === passage.id ? `2px solid ${passage.color}` : 'none',
-                          }}
-                        />
-                      ))}
+                <div className="absolute inset-0 pointer-events-none">
+                  {anns.map(a => {
+                    const active = selectedId === a.id || hoveredId === a.id;
+                    const first = a.rects[0];
+                    return (
+                      <div key={a.id} style={{ position: 'static' }}>
+                        {a.kind === 'highlight' && a.rects.map((r, ri) => (
+                          <div
+                            key={ri}
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: `${r.x * 100}%`, top: `${r.y * 100}%`,
+                              width: `${r.width * 100}%`, height: `${r.height * 100}%`,
+                              backgroundColor: a.color,
+                              opacity: active ? 0.6 : 0.35,
+                              outline: selectedId === a.id ? `2px solid ${a.color}` : 'none',
+                            }}
+                          />
+                        ))}
 
-                      {/* Note count badge — always visible when passage has notes */}
-                      {hasNotes && firstRect && (
-                        <div
-                          className="absolute z-40 pointer-events-auto"
-                          style={{
-                            left: `calc(${(firstRect.x + firstRect.width) * 100}% - 8px)`,
-                            top: `calc(${firstRect.y * 100}% - 8px)`,
-                          }}
-                        >
-                          <button
-                            onClick={e => { e.stopPropagation(); setNotesPopupPassageId(isNotesOpen ? null : passage.id); setTaggingPassageId(null); }}
-                            className="w-5 h-5 bg-amber-400 rounded-full flex items-center justify-center shadow-sm hover:bg-amber-500 transition-colors"
-                            title={`${passageNotes.length} note(s) — click to preview`}
+                        {a.kind === 'region' && first && (
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: `${first.x * 100}%`, top: `${first.y * 100}%`,
+                              width: `${first.width * 100}%`, height: `${first.height * 100}%`,
+                              border: `2px solid ${a.color}`,
+                              backgroundColor: a.color,
+                              opacity: active ? 0.28 : 0.14,
+                              borderRadius: 2,
+                            }}
+                          />
+                        )}
+
+                        {a.kind === 'note' && first && (
+                          <div
+                            data-overlay-ui
+                            className="absolute z-30 pointer-events-auto"
+                            style={{ left: `${first.x * 100}%`, top: `${first.y * 100}%` }}
                           >
-                            <StickyNote size={9} className="text-white" />
-                          </button>
-                        </div>
-                      )}
+                            <button
+                              onClick={e => { e.stopPropagation(); onSelect(a.id); openCommentEditor(a); }}
+                              className="w-5 h-5 rounded-full flex items-center justify-center shadow-sm"
+                              style={{ backgroundColor: a.color }}
+                              title={a.comment || 'Note'}
+                            >
+                              <StickyNote size={10} className="text-gray-800" />
+                            </button>
+                          </div>
+                        )}
 
-                      {/* Hover toolbar */}
-                      {(isHovered || isTagging || isNotesOpen) && firstRect && (
-                        <div
-                          data-passage-toolbar
-                          className="absolute z-50 pointer-events-auto flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1.5 py-1"
-                          style={{
-                            left: `${firstRect.x * 100}%`,
-                            top: `calc(${firstRect.y * 100}% - 34px)`,
-                          }}
-                        >
-                          <button
-                            onClick={e => { e.stopPropagation(); setTaggingPassageId(isTagging ? null : passage.id); setNewTagName(''); setAddingTag(false); }}
-                            className="p-1 text-gray-500 hover:text-blue-600 rounded hover:bg-blue-50 transition-colors"
-                            title="Add tag"
+                        {/* comment badge for highlight / region */}
+                        {a.kind !== 'note' && a.comment && first && (
+                          <div
+                            data-overlay-ui
+                            className="absolute z-30 pointer-events-auto"
+                            style={{
+                              left: `calc(${(first.x + first.width) * 100}% - 8px)`,
+                              top: `calc(${first.y * 100}% - 8px)`,
+                            }}
                           >
-                            <TagIcon size={13} />
-                          </button>
-                          {onFindSimilar && (
                             <button
-                              onClick={e => { e.stopPropagation(); onFindSimilar(passage); }}
-                              className="p-1 text-gray-500 hover:text-purple-600 rounded hover:bg-purple-50 transition-colors"
-                              title="Find similar passages"
+                              onClick={e => { e.stopPropagation(); onSelect(a.id); openCommentEditor(a); }}
+                              className="w-5 h-5 bg-amber-400 rounded-full flex items-center justify-center shadow-sm hover:bg-amber-500"
+                              title="Edit comment"
                             >
-                              <Sparkles size={13} />
+                              <StickyNote size={9} className="text-white" />
                             </button>
-                          )}
-                          {onLinkStart && (
-                            <button
-                              onClick={e => {
-                                e.stopPropagation();
-                                const pageEl = pageRefs.current[passage.page];
-                                const r = passage.rects[0];
-                                let passageRect: DOMRect | null = null;
-                                if (pageEl && r) {
-                                  const pb = pageEl.getBoundingClientRect();
-                                  passageRect = new DOMRect(pb.left + r.x * pb.width, pb.top + r.y * pb.height, r.width * pb.width, r.height * pb.height);
-                                }
-                                onLinkStart(passage, passageRect);
-                              }}
-                              className="p-1 text-gray-500 hover:text-teal-600 rounded hover:bg-teal-50 transition-colors"
-                              title="Link to another passage"
-                            >
-                              <Link2 size={13} />
-                            </button>
-                          )}
-                          {isLinked && onUnlink && (
-                            <button
-                              onClick={e => { e.stopPropagation(); onUnlink(passage.id); }}
-                              className="p-1 text-teal-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
-                              title="Remove link"
-                            >
-                              <Unlink size={13} />
-                            </button>
-                          )}
-                          <button
-                            onClick={e => { e.stopPropagation(); setNotesPopupPassageId(isNotesOpen ? null : passage.id); setTaggingPassageId(null); }}
-                            className={`p-1 rounded transition-colors ${hasNotes ? 'text-amber-500 hover:text-amber-700 hover:bg-amber-50' : 'text-gray-500 hover:text-amber-600 hover:bg-amber-50'}`}
-                            title={hasNotes ? `${passageNotes.length} note(s)` : 'Add note'}
-                          >
-                            <StickyNote size={13} />
-                          </button>
-                          <button
-                            onClick={e => { e.stopPropagation(); handleDeletePassage(passage.id); }}
-                            className="p-1 text-gray-500 hover:text-red-500 rounded hover:bg-red-50 transition-colors"
-                            title="Delete highlight"
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </div>
-                      )}
+                          </div>
+                        )}
 
-                      {/* Tag picker */}
-                      {isTagging && firstRect && (
-                        <div
-                          data-passage-toolbar
-                          className="absolute z-50 pointer-events-auto bg-white rounded-xl shadow-xl border border-gray-200 p-2 w-48"
-                          style={{
-                            left: `${firstRect.x * 100}%`,
-                            top: `calc(${firstRect.y * 100}% - 38px)`,
-                            transform: 'translateY(-100%)',
-                          }}
-                        >
-                          {passage.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-1 mb-2">
-                              {passage.tags.map(tag => (
-                                <span key={tag.id} className="flex items-center gap-0.5 px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
-                                  {tag.name}
-                                  <button onClick={() => handleRemoveTag(tag.id, passage)}>
-                                    <X size={9} className="text-gray-400 hover:text-red-400" />
-                                  </button>
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                          {!addingTag ? (
-                            <div className="flex flex-wrap gap-1">
-                              {availableTags.map(tag => (
-                                <button
-                                  key={tag.id}
-                                  onClick={() => handleAddTag(tag, passage)}
-                                  className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
-                                >
-                                  {tag.name}
-                                </button>
-                              ))}
-                              <button
-                                onClick={() => setAddingTag(true)}
-                                className="px-2 py-0.5 bg-white border border-dashed border-gray-300 rounded-full text-xs text-gray-400 hover:border-blue-400 hover:text-blue-600 transition-colors flex items-center gap-1"
-                              >
-                                <Plus size={9} /> New
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="flex gap-1.5">
-                              <input
-                                autoFocus
-                                value={newTagName}
-                                onChange={e => setNewTagName(e.target.value)}
-                                onKeyDown={e => { if (e.key === 'Enter') handleCreateTag(passage); if (e.key === 'Escape') setAddingTag(false); }}
-                                placeholder="Tag name"
-                                className="flex-1 px-2 py-1 text-xs border border-gray-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400"
-                              />
-                              <button onClick={() => handleCreateTag(passage)} className="px-2 py-1 bg-blue-600 text-white text-xs rounded-lg">Add</button>
-                              <button onClick={() => setAddingTag(false)} className="p-1 text-gray-400 hover:text-gray-600"><X size={12} /></button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {/* Notes popup */}
-                      {isNotesOpen && firstRect && (
-                        <div
-                          data-passage-toolbar
-                          className="absolute z-50 pointer-events-auto bg-white rounded-xl shadow-xl border border-gray-200 p-2 w-56"
-                          style={{
-                            left: `${firstRect.x * 100}%`,
-                            top: `calc(${firstRect.y * 100}% - 38px)`,
-                            transform: 'translateY(-100%)',
-                          }}
-                        >
-                          {passageNotes.length > 0 ? (
-                            <div className="space-y-1.5 mb-2 max-h-40 overflow-y-auto">
-                              {passageNotes.map(note => (
-                                <div key={note.id} className="text-xs text-gray-700 bg-amber-50 rounded-lg p-2">
-                                  <p className="line-clamp-3 leading-relaxed">{note.content}</p>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <p className="text-xs text-gray-400 text-center py-1 mb-1">No notes yet</p>
-                          )}
-                          {onNoteClick && (
+                        {/* hover toolbar */}
+                        {active && first && (
+                          <div
+                            data-overlay-ui
+                            className="absolute z-40 pointer-events-auto flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1.5 py-1"
+                            style={{ left: `${first.x * 100}%`, top: `calc(${first.y * 100}% - 34px)` }}
+                          >
                             <button
-                              onClick={() => { onNoteClick(passage); setNotesPopupPassageId(null); }}
-                              className="w-full py-1.5 text-xs text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                              onClick={e => { e.stopPropagation(); onSelect(a.id); openCommentEditor(a); }}
+                              className="p-1 text-gray-500 hover:text-amber-600 rounded hover:bg-amber-50"
+                              title={a.comment ? 'Edit comment' : 'Add comment'}
                             >
-                              {hasNotes ? 'Edit in sidebar →' : 'Add note in sidebar →'}
+                              <MessageSquarePlus size={13} />
                             </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                            <button
+                              onClick={e => { e.stopPropagation(); onDelete(a.id); }}
+                              className="p-1 text-gray-500 hover:text-red-500 rounded hover:bg-red-50"
+                              title="Delete"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
 
-                {/* Connected passage highlights (similarity — purple) */}
-                {connectedPassages?.filter(cp => cp.highlight && cp.page === i).flatMap((cp, ci) =>
-                  cp.rects.map((rect, ri) => (
+                  {/* region drag preview */}
+                  {regionDraft?.page === i && (
                     <div
-                      key={`conn-${ci}-${ri}`}
+                      className="absolute pointer-events-none border-2 border-dashed"
+                      style={{
+                        left: `${regionDraft.rect.x * 100}%`, top: `${regionDraft.rect.y * 100}%`,
+                        width: `${regionDraft.rect.width * 100}%`, height: `${regionDraft.rect.height * 100}%`,
+                        borderColor: selectedColor, backgroundColor: selectedColor, opacity: 0.25,
+                      }}
+                    />
+                  )}
+
+                  {/* transient flash from chat "possible locations" */}
+                  {flash?.page === i && flash.rects.map((r, ri) => (
+                    <div
+                      key={`flash-${ri}`}
                       className="absolute pointer-events-none animate-pulse"
                       style={{
-                        left: `${rect.x * 100}%`,
-                        top: `${rect.y * 100}%`,
-                        width: `${rect.width * 100}%`,
-                        height: `${rect.height * 100}%`,
-                        backgroundColor: '#7c3aed',
-                        opacity: 0.4,
-                        outline: '2.5px solid #7c3aed',
-                        borderRadius: '2px',
+                        left: `${r.x * 100}%`, top: `${r.y * 100}%`,
+                        width: `${r.width * 100}%`, height: `${r.height * 100}%`,
+                        backgroundColor: '#7c3aed', opacity: 0.35, outline: '2px solid #7c3aed', borderRadius: 2,
                       }}
                     />
-                  ))
-                )}
-
-                {/* Linking-target hover highlight */}
-                {linkingTarget && hoveredPassageId !== null && (passagesByPage[i] ?? []).filter(p => p.id === hoveredPassageId).flatMap(p =>
-                  p.rects.map((rect, ri) => (
-                    <div
-                      key={`lt-${ri}`}
-                      className="absolute pointer-events-none"
-                      style={{
-                        left: `${rect.x * 100}%`,
-                        top: `${rect.y * 100}%`,
-                        width: `${rect.width * 100}%`,
-                        height: `${rect.height * 100}%`,
-                        backgroundColor: '#0d9488',
-                        opacity: 0.35,
-                        outline: '2.5px solid #0d9488',
-                        borderRadius: '2px',
-                      }}
-                    />
-                  ))
-                )}
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </Document>
 
-        {/* Pending highlight toolbar */}
-        {pending && (
+        {/* text-selection popover */}
+        {pendingText && (
           <div
-            data-highlight-toolbar
+            data-overlay-ui
             className="absolute z-50 bg-white rounded-xl shadow-lg border border-gray-200 p-3 flex flex-col gap-2"
-            style={{ top: pending.toolbarY, left: pending.toolbarX, width: 210 }}
+            style={{ top: pendingText.y, left: pendingText.x, width: 230 }}
           >
-            <p className="text-xs text-gray-500 truncate">"{pending.text.slice(0, 60)}{pending.text.length > 60 ? '…' : ''}"</p>
+            <p className="text-xs text-gray-500 truncate">"{pendingText.text.slice(0, 60)}{pendingText.text.length > 60 ? '…' : ''}"</p>
             <div className="flex items-center gap-1.5">
               {HIGHLIGHT_COLORS.map(c => (
                 <button
                   key={c}
                   onClick={() => setSelectedColor(c)}
-                  className="w-5 h-5 rounded-full border-2 transition-transform hover:scale-110"
-                  style={{
-                    backgroundColor: c,
-                    borderColor: selectedColor === c ? '#374151' : 'transparent',
-                  }}
+                  className="w-5 h-5 rounded-full border-2 hover:scale-110 transition-transform"
+                  style={{ backgroundColor: c, borderColor: selectedColor === c ? '#374151' : 'transparent' }}
                 />
               ))}
             </div>
             <div className="flex gap-2">
-              <button
-                onClick={handleCreatePassage}
-                className="flex-1 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700"
-              >
+              <button onClick={commitHighlight} className="flex-1 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700">
                 Highlight
               </button>
+              <button onClick={askAboutText} className="flex-1 py-1 bg-gray-100 text-gray-700 text-xs rounded-lg hover:bg-gray-200">
+                Ask about this
+              </button>
               <button
-                onClick={() => { setPending(null); window.getSelection()?.removeAllRanges(); }}
+                onClick={() => { setPendingText(null); window.getSelection()?.removeAllRanges(); }}
                 className="p-1 text-gray-400 hover:text-gray-600 rounded"
               >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* region action popover */}
+        {regionMenu && (
+          <div
+            data-overlay-ui
+            className="absolute z-50 bg-white rounded-xl shadow-lg border border-gray-200 p-3 flex flex-col gap-2"
+            style={{ top: regionMenu.y, left: regionMenu.x, width: 230 }}
+          >
+            <div className="flex items-center gap-1.5">
+              {HIGHLIGHT_COLORS.map(c => (
+                <button
+                  key={c}
+                  onClick={() => setSelectedColor(c)}
+                  className="w-5 h-5 rounded-full border-2 hover:scale-110 transition-transform"
+                  style={{ backgroundColor: c, borderColor: selectedColor === c ? '#374151' : 'transparent' }}
+                />
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={commitRegion} className="flex-1 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700">
+                Highlight
+              </button>
+              <button onClick={askAboutRegion} className="flex-1 py-1 bg-gray-100 text-gray-700 text-xs rounded-lg hover:bg-gray-200">
+                Ask about this
+              </button>
+              <button onClick={() => { setRegionMenu(null); setMode('select'); }} className="p-1 text-gray-400 hover:text-gray-600 rounded">
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* comment editor */}
+        {editor && (
+          <div
+            data-overlay-ui
+            className="absolute z-50 bg-white rounded-xl shadow-lg border border-gray-200 p-3 flex flex-col gap-2"
+            style={{ top: editor.y, left: editor.x, width: 250 }}
+          >
+            <textarea
+              autoFocus
+              value={editor.value}
+              onChange={e => setEditor({ ...editor, value: e.target.value })}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveEditor();
+                if (e.key === 'Escape') setEditor(null);
+              }}
+              rows={3}
+              placeholder="Comment…"
+              className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-400 resize-none"
+            />
+            <div className="flex gap-2">
+              <button onClick={saveEditor} className="flex-1 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700">
+                Save
+              </button>
+              {editor.id && (
+                <button
+                  onClick={() => { onUpdateComment(editor.id!, ''); setEditor(null); }}
+                  className="px-2 py-1 text-gray-500 hover:text-red-500 text-xs rounded-lg"
+                  title="Remove comment"
+                >
+                  Clear
+                </button>
+              )}
+              <button onClick={() => setEditor(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded">
                 <X size={14} />
               </button>
             </div>

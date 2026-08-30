@@ -133,7 +133,6 @@ interface RawBlock {
 
 function extractPageBlocks(
   items: TextItem[],
-  pageWidth: number,
   pageHeight: number,
 ): RawBlock[] {
   if (!items.length) return [];
@@ -159,51 +158,79 @@ function extractPageBlocks(
 
   if (!words.length) return [];
 
-  const blocks: RawBlock[] = [];
-  let blockLines: RawLine[] = [];
+  // Group words into lines (same line = tops within half a line height).
+  const rawLines: RawLine[] = [];
   let lineWords: RawWord[] = [words[0]];
   let lineY = words[0].y0;
   let lineH = words[0].y1 - words[0].y0;
-
   for (let i = 1; i < words.length; i++) {
     const w = words[i];
-    const yDiff = w.y0 - lineY;
-
-    if (Math.abs(yDiff) <= Math.max(lineH * 0.5, 2)) {
-      // Same line
+    if (Math.abs(w.y0 - lineY) <= Math.max(lineH * 0.5, 2)) {
       lineWords.push(w);
       lineH = Math.max(lineH, w.y1 - w.y0);
     } else {
-      blockLines.push({ words: lineWords, y: lineY, height: lineH });
-
-      if (yDiff < 0 || yDiff > lineH * 1.2) {
-        // y went backward (column jump) or large gap (paragraph break)
-        blocks.push(makeBlock(blockLines, pageWidth, pageHeight));
-        blockLines = [];
-      }
-
+      rawLines.push({ words: lineWords, y: lineY, height: lineH });
       lineWords = [w];
       lineY = w.y0;
       lineH = w.y1 - w.y0;
     }
   }
+  rawLines.push({ words: lineWords, y: lineY, height: lineH });
 
-  blockLines.push({ words: lineWords, y: lineY, height: lineH });
-  blocks.push(makeBlock(blockLines, pageWidth, pageHeight));
+  // Page-level typography stats: median line advance and line height. These are
+  // far more stable than per-block estimates for deciding paragraph breaks.
+  const advList: number[] = [];
+  for (let i = 1; i < rawLines.length; i++) {
+    const a = rawLines[i].y - rawLines[i - 1].y;
+    if (a > 0 && a < rawLines[i].height * 4) advList.push(a);
+  }
+  advList.sort((a, b) => a - b);
+  const pageAdv = advList.length ? advList[advList.length >> 1] : 0;
+  const heights = rawLines.map(l => l.height).sort((a, b) => a - b);
+  const pageFont = heights.length ? heights[heights.length >> 1] : 10;
+
+  // Segment lines into blocks. A block boundary is a strong signal only:
+  // y jumps backward (new column) or a gap much larger than normal leading
+  // (section / figure break). Ordinary paragraph breaks stay inside the block
+  // and are marked in makeBlock.
+  const blocks: RawBlock[] = [];
+  let blockLines: RawLine[] = [rawLines[0]];
+  for (let i = 1; i < rawLines.length; i++) {
+    const adv = rawLines[i].y - rawLines[i - 1].y;
+    if (adv < 0 || (pageAdv > 0 && adv > pageAdv * 2.2)) {
+      blocks.push(makeBlock(blockLines, pageAdv, pageFont));
+      blockLines = [];
+    }
+    blockLines.push(rawLines[i]);
+  }
+  if (blockLines.length) blocks.push(makeBlock(blockLines, pageAdv, pageFont));
 
   return blocks.filter(b => b.text.length >= MIN_BLOCK_CHARS);
 }
 
-function makeBlock(lines: RawLine[], _pw: number, _ph: number): RawBlock {
+function makeBlock(lines: RawLine[], pageAdv: number, pageFont: number): RawBlock {
   const allWords = lines.flatMap(l => l.words);
   const x0 = Math.min(...allWords.map(w => w.x0));
   const y0 = Math.min(...allWords.map(w => w.y0));
   const x1 = Math.max(...allWords.map(w => w.x1));
   const y1 = Math.max(...allWords.map(w => w.y1));
 
-  // Build text: words on same line joined by space, lines joined by newline
-  const lineTexts = lines.map(l => l.words.map(w => w.text).join(' '));
-  const text = lineTexts.join('\n');
+  const lineIndent = (i: number) => Math.min(...lines[i].words.map(w => w.x0)) - x0;
+
+  // Words on a line joined by space; lines joined by "\n", with a blank line
+  // ("\n\n", a paragraph break) before a line whose vertical gap widens, or that
+  // is indented while the next line returns to the margin (a true first-line
+  // indent — not a hanging indent, which keeps every continuation line indented).
+  let text = lines.length ? lines[0].words.map(w => w.text).join(' ') : '';
+  for (let i = 1; i < lines.length; i++) {
+    const lineText = lines[i].words.map(w => w.text).join(' ');
+    const adv = lines[i].y - lines[i - 1].y;
+    const indent = lineIndent(i);
+    const nextIndent = i + 1 < lines.length ? lineIndent(i + 1) : 0;
+    const firstLineIndent = indent > pageFont * 0.6 && nextIndent < pageFont * 0.6;
+    const paragraphBreak = (pageAdv > 0 && adv > pageAdv * 1.4) || firstLineIndent;
+    text += (paragraphBreak ? '\n\n' : '\n') + lineText;
+  }
 
   return { lines, text, x0, y0, x1, y1 };
 }
@@ -254,11 +281,40 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(result);
 }
 
+// ---- Embedding (can run separately / in the background) ----
+
+export interface EmbedResult {
+  b64: string;
+  dim: number;
+  model: string;
+}
+
+/** Embed a list of chunk texts into a flat Float32 blob (base64). Empty result on failure. */
+export async function embedChunkTexts(
+  texts: string[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<EmbedResult> {
+  try {
+    const vectors = await embedBatch(texts, onProgress);
+    if (!vectors.length) return { b64: '', dim: 0, model: '' };
+    const dim = vectors[0].length;
+    const flat = new Float32Array(vectors.length * dim);
+    for (let i = 0; i < vectors.length; i++) flat.set(vectors[i], i * dim);
+    return { b64: arrayBufferToBase64(flat.buffer), dim, model: getEmbeddingModelId() };
+  } catch (e) {
+    if (!(e instanceof EmbeddingNotConfiguredError)) {
+      console.warn('Embedding failed, keeping chunks without embeddings:', e);
+    }
+    return { b64: '', dim: 0, model: '' };
+  }
+}
+
 // ---- Main export ----
 
 export async function processPaperClientSide(
   file: File,
   onProgress?: (stage: string) => void,
+  opts: { embed?: boolean } = {},
 ): Promise<ProcessResponse> {
   onProgress?.('Parsing PDF…');
 
@@ -288,7 +344,7 @@ export async function processPaperClientSide(
       firstPageText = items.map(i => i.str).join(' ');
     }
 
-    const blocks = extractPageBlocks(items, pw, ph);
+    const blocks = extractPageBlocks(items, ph);
 
     for (const block of blocks) {
       const blockWords = block.lines.flatMap(l => l.words);
@@ -367,35 +423,17 @@ export async function processPaperClientSide(
   const doi = extractDoi(firstPageText) ?? undefined;
   const arxivId = extractArxivId(firstPageText) ?? undefined;
 
-  // Embed all chunks
-  onProgress?.('Generating embeddings…');
-
-  let embeddingsBinB64 = '';
-  let embeddingDim = 0;
-
-  const allTexts = allChunkMeta.map(c => c.text);
-
-  try {
-    const allEmbeddings = await embedBatch(allTexts);
-    if (allEmbeddings.length) {
-      embeddingDim = allEmbeddings[0].length;
-      const flat = new Float32Array(allEmbeddings.length * embeddingDim);
-      for (let i = 0; i < allEmbeddings.length; i++) {
-        flat.set(allEmbeddings[i], i * embeddingDim);
-      }
-      embeddingsBinB64 = arrayBufferToBase64(flat.buffer);
-    }
-  } catch (e) {
-    if (!(e instanceof EmbeddingNotConfiguredError)) {
-      console.warn('Embedding failed, storing chunks without embeddings:', e);
-    }
+  let embedded: EmbedResult = { b64: '', dim: 0, model: '' };
+  if (opts.embed !== false) {
+    onProgress?.('Generating embeddings…');
+    embedded = await embedChunkTexts(allChunkMeta.map(c => c.text));
   }
 
   return {
     metadata: { title, filename: file.name, doi, arxiv_id: arxivId },
-    embeddings_bin_b64: embeddingsBinB64,
+    embeddings_bin_b64: embedded.b64,
     chunk_meta: allChunkMeta,
-    embedding_dim: embeddingDim,
-    embedding_model: embeddingDim > 0 ? getEmbeddingModelId() : '',
+    embedding_dim: embedded.dim,
+    embedding_model: embedded.dim > 0 ? embedded.model : '',
   };
 }
