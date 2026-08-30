@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { X, Settings, CheckCircle, XCircle, Loader } from 'lucide-react';
 import { getSettings, saveSettings, type AppSettings } from '../services/settingsService';
-import { saveStorageSettings, isStorageConnected } from '../storage/workspace';
 
 type TestStatus = 'idle' | 'testing' | 'ok' | 'error';
 
@@ -13,43 +12,67 @@ export function SettingsPanel({ onClose }: Props) {
   const [settings, setSettings] = useState<AppSettings>(getSettings);
   const [embStatus, setEmbStatus] = useState<TestStatus>('idle');
   const [llmStatus, setLlmStatus] = useState<TestStatus>('idle');
+  const [embError, setEmbError] = useState('');
+  const [llmError, setLlmError] = useState('');
 
   const update = (key: keyof AppSettings, value: string) =>
     setSettings(prev => ({ ...prev, [key]: value }));
 
   const handleSave = async () => {
     saveSettings(settings);
-    if (isStorageConnected()) await saveStorageSettings(settings);
     onClose();
+  };
+
+  // Normalize the base URL the same way the real service calls do.
+  const normBase = (u: string) => u.trim().replace(/\/+$/, '').replace(/\/v1$/i, '');
+
+  const describe = async (r: Response): Promise<string> => {
+    const raw = await r.text().catch(() => '');
+    try {
+      const msg = JSON.parse(raw)?.error?.message;
+      if (msg) return `${r.status}: ${msg}`;
+    } catch {
+      /* not JSON */
+    }
+    return `${r.status}: ${raw.slice(0, 300) || r.statusText}`;
   };
 
   const testEmbedding = async () => {
     setEmbStatus('testing');
+    setEmbError('');
     try {
-      const base = settings.embeddingBaseUrl.replace(/\/$/, '');
-      const r = await fetch(`${base}/v1/embeddings`, {
+      const r = await fetch(`${normBase(settings.embeddingBaseUrl)}/v1/embeddings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.embeddingApiKey || 'none'}` },
         body: JSON.stringify({ model: settings.embeddingModel, input: ['test'] }),
       });
       setEmbStatus(r.ok ? 'ok' : 'error');
-    } catch {
+      if (!r.ok) setEmbError(await describe(r));
+    } catch (e) {
       setEmbStatus('error');
+      setEmbError(`${(e as Error).message} — likely CORS or the host is unreachable.`);
     }
   };
 
   const testLLM = async () => {
     setLlmStatus('testing');
+    setLlmError('');
     try {
-      const base = settings.llmBaseUrl.replace(/\/$/, '');
-      const r = await fetch(`${base}/v1/chat/completions`, {
+      // Mirror the real request: same temperature the app sends.
+      const r = await fetch(`${normBase(settings.llmBaseUrl)}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.llmApiKey || 'none'}` },
-        body: JSON.stringify({ model: settings.llmModel, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({
+          model: settings.llmModel,
+          temperature: 0.2,
+          messages: [{ role: 'user', content: 'reply with the single word ok' }],
+        }),
       });
       setLlmStatus(r.ok ? 'ok' : 'error');
-    } catch {
+      if (!r.ok) setLlmError(await describe(r));
+    } catch (e) {
       setLlmStatus('error');
+      setLlmError(`${(e as Error).message} — likely CORS or the host is unreachable.`);
     }
   };
 
@@ -75,15 +98,20 @@ export function SettingsPanel({ onClose }: Props) {
               <StatusBadge status={embStatus} />
             </div>
             <Field label="Base URL" value={settings.embeddingBaseUrl} placeholder="http://localhost:1234/v1"
-              onChange={v => { update('embeddingBaseUrl', v); setEmbStatus('idle'); }} />
+              onChange={v => { update('embeddingBaseUrl', v); setEmbStatus('idle'); setEmbError(''); }} />
             <Field label="API Key" value={settings.embeddingApiKey} placeholder="lm-studio"
-              onChange={v => update('embeddingApiKey', v)} type="password" />
-            <Field label="Model" value={settings.embeddingModel} placeholder="text-embedding-nomic-embed-text-v1.5"
-              onChange={v => update('embeddingModel', v)} />
+              onChange={v => { update('embeddingApiKey', v); setEmbStatus('idle'); setEmbError(''); }} type="password" />
+            <Field label="Model" value={settings.embeddingModel} placeholder="text-embedding-3-small"
+              onChange={v => { update('embeddingModel', v); setEmbStatus('idle'); setEmbError(''); }} />
             <button onClick={testEmbedding} disabled={!settings.embeddingBaseUrl || embStatus === 'testing'}
               className="text-xs px-3 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 transition-colors">
               Test connection
             </button>
+            {embError && (
+              <p className="text-xs text-red-500 break-words whitespace-pre-wrap bg-red-50 border border-red-100 rounded-lg px-2 py-1.5">
+                {embError}
+              </p>
+            )}
             <p className="text-xs text-gray-400">
               OpenAI-compatible endpoint. Without this, similarity search uses BM25 keyword matching instead of embeddings.
             </p>
@@ -95,18 +123,37 @@ export function SettingsPanel({ onClose }: Props) {
               <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">LLM API</h3>
               <StatusBadge status={llmStatus} />
             </div>
-            <Field label="Base URL" value={settings.llmBaseUrl} placeholder="http://localhost:1234/v1"
-              onChange={v => { update('llmBaseUrl', v); setLlmStatus('idle'); }} />
-            <Field label="API Key" value={settings.llmApiKey} placeholder="lm-studio"
-              onChange={v => update('llmApiKey', v)} type="password" />
-            <Field label="Model" value={settings.llmModel} placeholder="qwen3"
-              onChange={v => update('llmModel', v)} />
+            <Field label="Base URL" value={settings.llmBaseUrl} placeholder="https://api.openai.com/v1"
+              onChange={v => { update('llmBaseUrl', v); setLlmStatus('idle'); setLlmError(''); }} />
+            <Field label="API Key" value={settings.llmApiKey} placeholder="sk-…"
+              onChange={v => { update('llmApiKey', v); setLlmStatus('idle'); setLlmError(''); }} type="password" />
+            <Field label="Model" value={settings.llmModel} placeholder="gpt-4o-mini"
+              onChange={v => { update('llmModel', v); setLlmStatus('idle'); setLlmError(''); }} />
             <button onClick={testLLM} disabled={!settings.llmBaseUrl || llmStatus === 'testing'}
               className="text-xs px-3 py-1.5 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-40 transition-colors">
               Test connection
             </button>
+            {llmError && (
+              <p className="text-xs text-red-500 break-words whitespace-pre-wrap bg-red-50 border border-red-100 rounded-lg px-2 py-1.5">
+                {llmError}
+              </p>
+            )}
+            <Field label="Context window (tokens)" value={settings.llmContextTokens} placeholder="32000"
+              onChange={v => update('llmContextTokens', v.replace(/[^0-9]/g, ''))} />
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.qaRequireSources !== 'no'}
+                onChange={e => update('qaRequireSources', e.target.checked ? 'yes' : 'no')}
+                className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-400"
+              />
+              Require the model to cite its sources
+            </label>
             <p className="text-xs text-gray-400">
-              OpenAI-compatible chat completions endpoint. Used for Q&amp;A in the Search tab.
+              OpenAI-compatible chat completions endpoint. The paper is sent as numbered passages on
+              every question. With citing on, the model must return <code>{'{answer, sources}'}</code> (retried
+              once if it doesn't) and you get clickable source cards; off is faster and more reliable on
+              small models but gives the answer only. Set the context window to your model's real size.
             </p>
           </div>
         </div>
