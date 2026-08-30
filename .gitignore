@@ -8,6 +8,9 @@ venv/
 node_modules/
 dist/
 
+# Electron packaging output
+frontend/release/
+
 # Local user data (File System Access API workspace folder)
 storage/
 
