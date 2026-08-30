@@ -1,143 +1,152 @@
-import { useEffect, useState } from 'react';
-import { LibraryView } from './components/LibraryView';
+import { useRef, useState } from 'react';
+import { OpenPdfScreen } from './components/OpenPdfScreen';
 import { ReaderView } from './components/ReaderView';
 import { SettingsPanel } from './components/SettingsPanel';
-import type { Paper, Project } from './api';
-import { LocalFolderAdapter } from './storage/LocalFolderAdapter';
-import { setAdapter, getStorageSettings } from './storage/workspace';
-import { getSettings, saveSettings } from './services/settingsService';
-import { clearChunkCache } from './utils/similarity';
-import { FolderOpen, Settings } from 'lucide-react';
+import { api } from './api';
+import type { ProcessResponse } from './api';
+import { pickPdf, flushWrites, type OpenedPdf } from './services/pdfFile';
+import { getCachedPaper, putCachedPaper, type PaperCacheEntry } from './services/paperCache';
+import { getEmbeddingModelId, hasEmbeddingConfig } from './services/settingsService';
 
+export interface EmbedProgress {
+  done: number;
+  total: number;
+}
 
-type AppState = 'loading' | 'needs-folder' | 'ready';
-
-const adapter = new LocalFolderAdapter();
+function toEntry(hash: string, name: string, r: ProcessResponse): PaperCacheEntry {
+  return {
+    hash,
+    title: r.metadata.title,
+    filename: name,
+    doi: r.metadata.doi,
+    arxivId: r.metadata.arxiv_id,
+    chunkMeta: r.chunk_meta,
+    embeddingsB64: r.embeddings_bin_b64,
+    embeddingDim: r.embedding_dim,
+    embeddingModel: r.embedding_model || (r.embedding_dim > 0 ? getEmbeddingModelId() : ''),
+    createdAt: new Date().toISOString(),
+  };
+}
 
 function App() {
-  const [appState, setAppState] = useState<AppState>('loading');
-  const [storedFolderName, setStoredFolderName] = useState<string | null>(null);
-  const [selectedPaper, setSelectedPaper] = useState<Paper | null>(null);
-  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [opened, setOpened] = useState<OpenedPdf | null>(null);
+  const [cache, setCache] = useState<PaperCacheEntry | null>(null);
+  const [pdfUrl, setPdfUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState('');
+  const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const openSettings = () => setShowSettings(true);
+  const [embedProgress, setEmbedProgress] = useState<EmbedProgress | null>(null);
 
-  useEffect(() => {
-    adapter.getStoredFolderName().then(name => {
-      setStoredFolderName(name);
-      setAppState('needs-folder');
-    });
-  }, []);
+  // Which paper the background embedding task is currently for (ignore stale updates).
+  const embedForHash = useRef<string | null>(null);
 
-  const applyStorageSettings = async () => {
-    try {
-      const stored = await getStorageSettings();
-      if (stored) saveSettings({ ...getSettings(), ...stored });
-    } catch { /* no settings.json yet — fine */ }
+  /** Generate embeddings for `entry` in the background, then update the cache in place. */
+  const runBackgroundEmbedding = (entry: PaperCacheEntry) => {
+    if (entry.embeddingDim > 0 && entry.embeddingModel === getEmbeddingModelId()) return;
+    if (!hasEmbeddingConfig()) return;
+
+    embedForHash.current = entry.hash;
+    setEmbedProgress({ done: 0, total: entry.chunkMeta.length });
+
+    void api
+      .embedChunks(entry.chunkMeta.map(c => c.text), (done, total) => {
+        if (embedForHash.current === entry.hash) setEmbedProgress({ done, total });
+      })
+      .then(async res => {
+        if (res.dim > 0) {
+          const updated: PaperCacheEntry = {
+            ...entry,
+            embeddingsB64: res.b64,
+            embeddingDim: res.dim,
+            embeddingModel: res.model,
+          };
+          await putCachedPaper(updated);
+          setCache(prev => (prev && prev.hash === updated.hash ? updated : prev));
+        }
+      })
+      .catch(e => console.warn('Background embedding failed:', e))
+      .finally(() => {
+        if (embedForHash.current === entry.hash) {
+          embedForHash.current = null;
+          setEmbedProgress(null);
+        }
+      });
   };
 
-  const handleReconnect = async () => {
+  const handleOpen = async () => {
+    setError(null);
+    setBusy(true);
     try {
-      const restored = await adapter.tryRestoreFromIDB();
-      if (restored) {
-        setAdapter(adapter);
-        await applyStorageSettings();
-        setAppState('ready');
+      setStage('Opening…');
+      const pdf = await pickPdf();
+      if (!pdf) {
+        setBusy(false);
         return;
       }
-      // Permission denied — fall back to picker
-      await adapter.connect();
-      setStoredFolderName(await adapter.getStoredFolderName());
-      setAdapter(adapter);
-      await applyStorageSettings();
-      setAppState('ready');
-    } catch {
-      // User cancelled — stay on needs-folder
+
+      let entry = await getCachedPaper(pdf.hash);
+      let fresh = false;
+      if (!entry) {
+        fresh = true;
+        setStage('Reading the PDF…');
+        const result = await api.processPaper(
+          new File([pdf.bytes], pdf.name, { type: 'application/pdf' }),
+          setStage,
+          { embed: false }, // parse now, embed in the background
+        );
+        entry = toEntry(pdf.hash, pdf.name, result);
+        await putCachedPaper(entry);
+      }
+
+      setPdfUrl(URL.createObjectURL(new Blob([pdf.bytes], { type: 'application/pdf' })));
+      setOpened(pdf);
+      setCache(entry);
+      if (fresh) runBackgroundEmbedding(entry);
+    } catch (e) {
+      console.error(e);
+      setError((e as Error).message || 'Could not open that PDF.');
+    } finally {
+      setBusy(false);
+      setStage('');
     }
   };
 
-  const handleChooseNew = async () => {
-    try {
-      await adapter.connect();
-      setStoredFolderName(await adapter.getStoredFolderName());
-      setAdapter(adapter);
-      await applyStorageSettings();
-      setAppState('ready');
-    } catch {
-      // User cancelled — stay on needs-folder
-    }
+  const handleClose = async () => {
+    await flushWrites();
+    embedForHash.current = null;
+    setEmbedProgress(null);
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+    setPdfUrl('');
+    setOpened(null);
+    setCache(null);
   };
 
-  if (appState === 'loading') {
-    return (
-      <div className="flex h-screen items-center justify-center bg-gray-50">
-        <div className="text-sm text-gray-400 animate-pulse">Loading…</div>
-      </div>
+  const handleReprocess = async () => {
+    if (!opened) return;
+    const result = await api.processPaper(
+      new File([opened.bytes], opened.name, { type: 'application/pdf' }),
+      undefined,
+      { embed: false },
     );
-  }
+    const entry = toEntry(opened.hash, opened.name, result);
+    await putCachedPaper(entry);
+    setCache(entry);
+    runBackgroundEmbedding(entry);
+  };
 
-  if (appState === 'needs-folder') {
-    return (
-      <div className="flex h-screen items-center justify-center bg-gray-50">
-        {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-        <button onClick={openSettings} className="absolute top-3 right-3 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors" title="Settings">
-          <Settings size={16} />
-        </button>
-        <div className="text-center space-y-4 max-w-sm px-6">
-          <div className="w-14 h-14 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto">
-            <FolderOpen size={28} className="text-blue-600" />
-          </div>
-          <h1 className="text-lg font-bold text-gray-900">Paper Explorer</h1>
-          {storedFolderName ? (
-            <>
-              <p className="text-sm text-gray-500">
-                Click to reconnect to your workspace folder <strong>"{storedFolderName}"</strong>.
-              </p>
-              <button
-                onClick={handleReconnect}
-                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors"
-              >
-                Open "{storedFolderName}"
-              </button>
-              <button
-                onClick={handleChooseNew}
-                className="text-xs text-gray-400 hover:text-gray-600 underline"
-              >
-                Choose a different folder
-              </button>
-            </>
-          ) : (
-            <>
-              <p className="text-sm text-gray-500">
-                Choose a folder on your computer to store your workspace — papers, highlights, notes, and embeddings will all live there.
-              </p>
-              <button
-                onClick={handleChooseNew}
-                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-medium hover:bg-blue-700 transition-colors"
-              >
-                Choose workspace folder
-              </button>
-            </>
-          )}
-          <p className="text-xs text-gray-400">Works in Chrome and Edge. Firefox is not supported.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (selectedPaper && selectedProject) {
+  if (opened && cache && pdfUrl) {
     return (
       <>
         {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
         <ReaderView
-          paper={selectedPaper}
-          project={selectedProject}
-          onBack={() => {
-            clearChunkCache();
-            setSelectedPaper(null);
-            setSelectedProject(null);
-          }}
-          onOpenSettings={openSettings}
+          opened={opened}
+          cache={cache}
+          pdfUrl={pdfUrl}
+          embedProgress={embedProgress}
+          onClose={handleClose}
+          onReprocess={handleReprocess}
+          onOpenSettings={() => setShowSettings(true)}
         />
       </>
     );
@@ -146,12 +155,12 @@ function App() {
   return (
     <>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-      <LibraryView
-        onOpenPaper={(paper, project) => {
-          setSelectedPaper(paper);
-          setSelectedProject(project);
-        }}
-        onOpenSettings={openSettings}
+      <OpenPdfScreen
+        onOpen={handleOpen}
+        onOpenSettings={() => setShowSettings(true)}
+        busy={busy}
+        stage={stage}
+        error={error}
       />
     </>
   );
