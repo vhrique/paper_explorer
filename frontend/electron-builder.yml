@@ -6,10 +6,15 @@ directories:
   output: release
   buildResources: build   # drop a 512x512+ build/icon.png here for a custom icon
 
+# The renderer is fully bundled into dist/ by Vite and electron/main.cjs only
+# uses built-in modules, so nothing from node_modules needs to ship — and there
+# are no native deps to rebuild (canvas is an unused optional dep of pdfjs).
+npmRebuild: false
 files:
   - dist/**
   - electron/**
   - package.json
+  - '!node_modules/**'
 
 # no auto-publish; CI uploads artifacts / attaches to releases explicitly
 publish: null
