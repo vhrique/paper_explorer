@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "Single-paper assisted PDF reader with chat and native annotations",
-  "author": "vhrique",
+  "author": {
+    "name": "vhrique",
+    "email": "vhrique@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/vhrique/paper_explorer",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
