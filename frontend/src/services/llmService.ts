@@ -1,41 +1,58 @@
 import { getSettings } from './settingsService';
 
-export async function answerQuestion(
-  query: string,
-  paperTitle: string,
-  chunks: Array<{ text: string; page: number }>,
-): Promise<string | null> {
+export interface ChatTurn {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+function endpoint() {
   const { llmBaseUrl, llmApiKey, llmModel } = getSettings();
   if (!llmBaseUrl.trim()) return null;
-
-  const context = chunks
-    .map((c, i) => `[${i + 1}] (page ${c.page + 1}) ${c.text}`)
-    .join('\n\n');
-
   const base = llmBaseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '');
-  const r = await fetch(`${base}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${llmApiKey || 'none'}`,
-    },
-    body: JSON.stringify({
-      model: llmModel,
-      temperature: 0.3,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a research assistant helping a scientist understand a paper. Answer questions based strictly on the provided passages.',
-        },
-        {
-          role: 'user',
-          content: `Question: ${query}\n\nRelevant passages from "${paperTitle}":\n\n${context}\n\nAnswer the question based only on the passages above. Be concise. If the passages don't contain enough information, say so.`,
-        },
-      ],
-    }),
-  });
+  return { url: `${base}/v1/chat/completions`, key: llmApiKey || 'none', model: llmModel };
+}
 
-  if (!r.ok) return null;
-  const json = await r.json();
-  return (json.choices?.[0]?.message?.content as string | undefined) ?? null;
+const HEADERS = (key: string) => ({
+  'Content-Type': 'application/json',
+  Authorization: `Bearer ${key}`,
+  'anthropic-dangerous-direct-browser-access': 'true',
+});
+
+export interface ChatOptions {
+  signal?: AbortSignal;
+  /** Ask the server for a JSON object response (OpenAI / LM Studio "JSON mode"). */
+  json?: boolean;
+}
+
+/** Non-streaming chat completion. Returns null if no endpoint is configured.
+ *  Retries after dropping request params the model rejects (temperature,
+ *  response_format) — different OpenAI-compatible models support different sets. */
+export async function chat(messages: ChatTurn[], opts: ChatOptions = {}): Promise<string | null> {
+  const ep = endpoint();
+  if (!ep) return null;
+
+  const body: Record<string, unknown> = { model: ep.model, temperature: 0.2, messages };
+  if (opts.json) body.response_format = { type: 'json_object' };
+
+  const post = () =>
+    fetch(ep.url, { method: 'POST', headers: HEADERS(ep.key), body: JSON.stringify(body), signal: opts.signal });
+
+  let r = await post();
+  for (let i = 0; i < 3 && !r.ok && (r.status === 400 || r.status === 422); i++) {
+    const txt = await r.text().catch(() => '');
+    let dropped = false;
+    if ('temperature' in body && /temperature/i.test(txt)) {
+      delete body.temperature;
+      dropped = true;
+    }
+    if ('response_format' in body && /response_format|json/i.test(txt)) {
+      delete body.response_format;
+      dropped = true;
+    }
+    if (!dropped) throw new Error(`LLM ${r.status}: ${txt.slice(0, 300)}`);
+    r = await post();
+  }
+  if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}`);
+  const j = await r.json();
+  return (j.choices?.[0]?.message?.content as string | undefined) ?? null;
 }
