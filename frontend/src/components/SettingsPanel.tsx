@@ -58,18 +58,27 @@ export function SettingsPanel({ onClose }: Props) {
     setLlmStatus('testing');
     setLlmError('');
     try {
-      // Mirror the real request: same temperature the app sends.
-      const r = await fetch(`${normBase(settings.llmBaseUrl)}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.llmApiKey || 'none'}` },
-        body: JSON.stringify({
-          model: settings.llmModel,
-          temperature: 0.2,
-          messages: [{ role: 'user', content: 'reply with the single word ok' }],
-        }),
-      });
+      const url = `${normBase(settings.llmBaseUrl)}/v1/chat/completions`;
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.llmApiKey || 'none'}` };
+      const body: Record<string, unknown> = {
+        model: settings.llmModel,
+        temperature: 0.2,
+        messages: [{ role: 'user', content: 'reply with the single word ok' }],
+      };
+      // Same fallback the app uses: drop params the model rejects, then retry.
+      let r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      let note = '';
+      if (!r.ok && (r.status === 400 || r.status === 422)) {
+        const txt = await r.text().catch(() => '');
+        if (/temperature/i.test(txt) && 'temperature' in body) {
+          delete body.temperature;
+          note = ' (this model ignores temperature — the app handles that automatically)';
+          r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+        }
+      }
       setLlmStatus(r.ok ? 'ok' : 'error');
       if (!r.ok) setLlmError(await describe(r));
+      else if (note) setLlmError(note.trim());
     } catch (e) {
       setLlmStatus('error');
       setLlmError(`${(e as Error).message} — likely CORS or the host is unreachable.`);
@@ -134,7 +143,13 @@ export function SettingsPanel({ onClose }: Props) {
               Test connection
             </button>
             {llmError && (
-              <p className="text-xs text-red-500 break-words whitespace-pre-wrap bg-red-50 border border-red-100 rounded-lg px-2 py-1.5">
+              <p
+                className={`text-xs break-words whitespace-pre-wrap rounded-lg px-2 py-1.5 ${
+                  llmStatus === 'ok'
+                    ? 'text-gray-500 bg-gray-50 border border-gray-100'
+                    : 'text-red-500 bg-red-50 border border-red-100'
+                }`}
+              >
                 {llmError}
               </p>
             )}
