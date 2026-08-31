@@ -4,7 +4,7 @@ copyright: Copyright © 2026
 
 directories:
   output: release
-  buildResources: build   # drop a 512x512+ build/icon.png here for a custom icon
+  buildResources: build   # build/icon.png -> auto .ico / .icns / linux png
 
 # The renderer is fully bundled into dist/ by Vite and electron/main.cjs only
 # uses built-in modules, so nothing from node_modules needs to ship — and there
@@ -23,12 +23,19 @@ win:
   target:
     - nsis
     - portable
-  artifactName: ${productName}-${version}-${arch}.${ext}
 
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Paper Reader
+  runAfterFinish: true
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-${arch}-portable.${ext}
 
 mac:
   target:
