@@ -11,4 +11,6 @@ contextBridge.exposeInMainWorld('electronPdf', {
   },
   read: filePath => ipcRenderer.invoke('pdf:read', filePath),
   write: (filePath, data) => ipcRenderer.invoke('pdf:write', filePath, data),
+  /** Open a fresh window (its own paper). */
+  newWindow: () => ipcRenderer.send('open-new-window'),
 });
