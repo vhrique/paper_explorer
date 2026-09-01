@@ -54,8 +54,9 @@ function createWindow(pdfPath) {
       spellcheck: false,
     },
   });
+  const wcId = win.webContents.id; // capture now — webContents is gone by the 'closed' event
   windows.add(win);
-  if (pdfPath) pendingByWc.set(win.webContents.id, pdfPath);
+  if (pdfPath) pendingByWc.set(wcId, pdfPath);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) {
@@ -89,7 +90,7 @@ function createWindow(pdfPath) {
 
   win.on('closed', () => {
     windows.delete(win);
-    pendingByWc.delete(win.webContents.id);
+    pendingByWc.delete(wcId);
   });
 
   if (isDev) {
