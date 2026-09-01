@@ -1,8 +1,9 @@
 name: Deploy to GitHub Pages
 
+# On hold: GitHub Pages needs a paid plan for private repos, so this can't
+# publish yet. Manual-only — re-add `push: { branches: [main] }` once Pages is
+# enabled (Settings → Pages → Source: GitHub Actions), or if the repo goes public.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
