@@ -11,10 +11,16 @@ interface ElectronPdfBridge {
   onOpen: (cb: (filePath: string) => void) => () => void;
   read: (filePath: string) => Promise<Uint8Array>;
   write: (filePath: string, data: ArrayBuffer) => Promise<void>;
+  newWindow: () => void;
 }
 
 function bridge(): ElectronPdfBridge | null {
   return (window as unknown as { electronPdf?: ElectronPdfBridge }).electronPdf ?? null;
+}
+
+/** Open a fresh app window (Electron only; no-op in a browser). */
+export function openNewWindow(): void {
+  bridge()?.newWindow();
 }
 
 /** Copy any byte source into a plain (non-shared) ArrayBuffer. */
