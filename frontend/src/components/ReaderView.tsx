@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, PanelRight, Settings, MessagesSquare, ListChecks, RefreshCw } from 'lucide-react';
+import { ArrowLeft, PanelRight, Settings, MessagesSquare, ListChecks, RefreshCw, FilePlus2 } from 'lucide-react';
 import type { Annotation, ChatMessage, ChatSession, ChunkResult, QuoteContext, Rect } from '../api';
 import type { OpenedPdf } from '../services/pdfFile';
 import { writeBack } from '../services/pdfFile';
@@ -7,6 +7,7 @@ import type { PaperCacheEntry } from '../services/paperCache';
 import { getChats, saveChats } from '../services/paperCache';
 import { chunksFromCache } from '../services/qaService';
 import { extractRegionText } from '../services/pdfText';
+import { isElectron, openNewWindow } from '../services/electronFile';
 import {
   readAnnotations, addHighlight, addRegion, addNote, updateComment, deleteAnnotation,
 } from '../services/pdfAnnotations';
@@ -273,6 +274,15 @@ export function ReaderView({ opened, cache, pdfUrl, embedProgress, onClose, onRe
         <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors" title="Close PDF">
           <ArrowLeft size={18} className="text-gray-500" />
         </button>
+        {isElectron() && (
+          <button
+            onClick={openNewWindow}
+            className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors text-gray-400"
+            title="Open another PDF in a new window"
+          >
+            <FilePlus2 size={16} />
+          </button>
+        )}
         <p className="text-sm font-semibold text-gray-700 truncate">{cache.title || opened.name}</p>
         <span className="text-[11px] text-gray-400 flex-shrink-0">
           {embedding
