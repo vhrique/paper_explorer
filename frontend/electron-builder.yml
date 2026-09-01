@@ -19,6 +19,15 @@ files:
 # no auto-publish; CI uploads artifacts / attaches to releases explicitly
 publish: null
 
+# Register as a PDF handler → shows up under the OS "Open with…" menu.
+# (Windows 10/11 still requires a manual click in Settings to make it the default.)
+fileAssociations:
+  - ext: pdf
+    name: PDF Document
+    description: PDF Document
+    role: Editor
+    mimeType: application/pdf
+
 win:
   target:
     - nsis
