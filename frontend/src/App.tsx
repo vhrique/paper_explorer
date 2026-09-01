@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { OpenPdfScreen } from './components/OpenPdfScreen';
 import { ReaderView } from './components/ReaderView';
 import { SettingsPanel } from './components/SettingsPanel';
 import { api } from './api';
 import type { ProcessResponse } from './api';
 import { pickPdf, flushWrites, type OpenedPdf } from './services/pdfFile';
+import { onOpenPdfPath, openPdfFromPath } from './services/electronFile';
 import { getCachedPaper, putCachedPaper, type PaperCacheEntry } from './services/paperCache';
 import { getEmbeddingModelId, hasEmbeddingConfig } from './services/settingsService';
 
@@ -42,7 +43,7 @@ function App() {
   const embedForHash = useRef<string | null>(null);
 
   /** Generate embeddings for `entry` in the background, then update the cache in place. */
-  const runBackgroundEmbedding = (entry: PaperCacheEntry) => {
+  const runBackgroundEmbedding = useCallback((entry: PaperCacheEntry) => {
     if (entry.embeddingDim > 0 && entry.embeddingModel === getEmbeddingModelId()) return;
     if (!hasEmbeddingConfig()) return;
 
@@ -72,45 +73,78 @@ function App() {
           setEmbedProgress(null);
         }
       });
-  };
+  }, []);
 
-  const handleOpen = async () => {
-    setError(null);
-    setBusy(true);
-    try {
-      setStage('Opening…');
-      const pdf = await pickPdf();
+  /** Given a resolved PDF source, process/cache it and open the reader. */
+  const loadPdf = useCallback(
+    async (pdf: OpenedPdf | null) => {
       if (!pdf) {
         setBusy(false);
+        setStage('');
         return;
       }
+      setError(null);
+      setBusy(true);
+      try {
+        await flushWrites(); // flush pending writes for a previously-open file
+        embedForHash.current = null;
+        setEmbedProgress(null);
 
-      let entry = await getCachedPaper(pdf.hash);
-      let fresh = false;
-      if (!entry) {
-        fresh = true;
-        setStage('Reading the PDF…');
-        const result = await api.processPaper(
-          new File([pdf.bytes], pdf.name, { type: 'application/pdf' }),
-          setStage,
-          { embed: false }, // parse now, embed in the background
-        );
-        entry = toEntry(pdf.hash, pdf.name, result);
-        await putCachedPaper(entry);
+        let entry = await getCachedPaper(pdf.hash);
+        let fresh = false;
+        if (!entry) {
+          fresh = true;
+          setStage('Reading the PDF…');
+          const result = await api.processPaper(
+            new File([pdf.bytes], pdf.name, { type: 'application/pdf' }),
+            setStage,
+            { embed: false }, // parse now, embed in the background
+          );
+          entry = toEntry(pdf.hash, pdf.name, result);
+          await putCachedPaper(entry);
+        }
+
+        const url = URL.createObjectURL(new Blob([pdf.bytes], { type: 'application/pdf' }));
+        setPdfUrl(prev => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+        setOpened(pdf);
+        setCache(entry);
+        if (fresh) runBackgroundEmbedding(entry);
+      } catch (e) {
+        console.error(e);
+        setError((e as Error).message || 'Could not open that PDF.');
+      } finally {
+        setBusy(false);
+        setStage('');
       }
+    },
+    [runBackgroundEmbedding],
+  );
 
-      setPdfUrl(URL.createObjectURL(new Blob([pdf.bytes], { type: 'application/pdf' })));
-      setOpened(pdf);
-      setCache(entry);
-      if (fresh) runBackgroundEmbedding(entry);
-    } catch (e) {
-      console.error(e);
-      setError((e as Error).message || 'Could not open that PDF.');
-    } finally {
-      setBusy(false);
-      setStage('');
-    }
-  };
+  const handleOpen = useCallback(async () => {
+    setBusy(true);
+    setStage('Opening…');
+    await loadPdf(await pickPdf());
+  }, [loadPdf]);
+
+  // "Open with… Paper Reader" (Electron only; no-op in a browser).
+  useEffect(
+    () =>
+      onOpenPdfPath(filePath => {
+        setBusy(true);
+        setStage('Opening…');
+        openPdfFromPath(filePath)
+          .then(loadPdf)
+          .catch(e => {
+            setError((e as Error).message);
+            setBusy(false);
+            setStage('');
+          });
+      }),
+    [loadPdf],
+  );
 
   const handleClose = async () => {
     await flushWrites();
