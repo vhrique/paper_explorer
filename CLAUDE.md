@@ -1,106 +1,185 @@
-# Paper Explorer
+# Paper Reader
 
-A stateless, frontend-only web app for exploring, annotating, and linking academic papers. Upload PDFs, highlight passages, tag them, ask questions, and discover semantically similar passages across papers in a project. All data lives in a user-picked local folder — no server, no database.
+A stateless, frontend-only web app for reading **one** academic PDF with an assistant.
+Open a PDF, ask questions about it in a chat (answers point you to the exact
+paragraphs), and highlight / comment / draw regions — all saved back into the PDF
+file itself in its native annotation format, so they're portable to any PDF reader.
+
+No server, no database, no accounts. Everything runs in the browser (or, packaged
+with Electron, on the desktop). The user brings their own OpenAI-compatible
+LLM/embedding endpoint.
+
+> Was previously a multi-paper "explorer" (projects, library, cross-paper
+> similarity, a learned TF.js projection model, dual-pane linking). That's all
+> gone — see git history if you need it.
 
 ## Architecture
 
 ```
 paper_explorer/
-├── frontend/                         # React + TypeScript + Vite + Tailwind CSS
+├── frontend/                          # React 19 + TypeScript + Vite 7 + Tailwind 3
+│   ├── index.html
+│   ├── vite.config.ts                 # base './' for build (Electron/subpath); VITE_BASE override
+│   ├── Dockerfile                     # dev: Vite dev server on :5173
+│   ├── Dockerfile.prod                # prod: `vite build` → nginx static
+│   ├── nginx.conf
+│   ├── electron-builder.yml           # win/mac/linux targets + .pdf file association
+│   ├── electron/
+│   │   ├── main.cjs                   # no menu bar; CORS relaxed; single-instance; "open with" PDF
+│   │   └── preload.cjs                # contextBridge: window.electronPdf {onOpen, read, write}
+│   ├── build/icon.png                 # 1024px app icon (electron-builder derives .ico/.icns)
 │   └── src/
-│       ├── App.tsx                   # Root: switches between LibraryView and ReaderView
-│       ├── api/
-│       │   └── index.ts              # Shared types; client-side implementations of all "API" calls
+│       ├── App.tsx                    # state machine: no-pdf → reader; loadPdf() pipeline;
+│       │                              #   subscribes to Electron "open with"; background embedding
+│       ├── api/index.ts               # shared types + thin client API
+│       │                              #   (processPaper, embedText, embedChunks, fetchMetadata*)
 │       ├── components/
-│       │   ├── LibraryView.tsx       # Project/paper management, uploads
-│       │   ├── ReaderView.tsx        # Double-pane PDF reader, orchestrates all sub-components
-│       │   ├── PDFPanel.tsx          # PDF renderer (react-pdf), text selection → highlights
-│       │   ├── ContextPanel.tsx      # Sidebar: Highlights, Links, Similar, Search, Notes tabs
-│       │   └── ConnectionOverlay.tsx # SVG Bezier lines connecting similar/linked passages
-│       ├── services/
-│       │   ├── pdfProcessor.ts       # pdfjs: PDF → blocks/paragraphs/sentences + per-line rects
-│       │   ├── embeddingService.ts   # OpenAI-compatible embedding API client
-│       │   ├── llmService.ts         # OpenAI-compatible LLM API client (Q&A)
-│       │   ├── similarityModel.ts    # TF.js learned projection model (training + inference)
-│       │   ├── settingsService.ts    # Read/write app settings (embedding URL, model, etc.)
-│       │   └── metadataService.ts    # DOI/arXiv metadata lookup
-│       ├── storage/
-│       │   ├── types.ts              # TypeScript interfaces for all on-disk data shapes
-│       │   ├── LocalFolderAdapter.ts # File System Access API: read/write files in user folder
-│       │   └── workspace.ts          # All CRUD: projects, papers, passages, notes, links
-│       └── utils/
-│           └── similarity.ts         # Cosine + BM25 similarity search; chunk cache management
-└── docker-compose.yml                # Single service: Vite dev server on :5173
+│       │   ├── OpenPdfScreen.tsx      # the "Open a PDF" landing screen
+│       │   ├── ReaderView.tsx         # orchestrator: PDFPanel + sidebar (Chat / Annotations),
+│       │   │                          #   annotation state + write-back, chat sessions, jump/flash
+│       │   ├── PDFPanel.tsx           # react-pdf render; modes: select-text / region / add-note;
+│       │   │                          #   selection→highlight; overlay drawn from parsed annotations
+│       │   ├── ChatPanel.tsx          # multi-chat; JSON {answer, sources} Q&A; location cards
+│       │   ├── AnnotationsList.tsx    # sidebar list: edit comment / delete / jump-to
+│       │   └── SettingsPanel.tsx      # LLM + embedding endpoints, context window, require-sources
+│       └── services/
+│           ├── pdfFile.ts             # showOpenFilePicker (rw handle); debounced atomic write-back;
+│           │                          #   WritableFileHandle structural type; IDB original stash
+│           ├── electronFile.ts        # wraps an OS file path in the same WritableFileHandle shape
+│           ├── pdfProcessor.ts        # pdfjs: PDF → block/paragraph/sentence chunks + per-line rects;
+│           │                          #   page-level typography stats; embedChunkTexts() (background)
+│           ├── pdfAnnotations.ts      # pdf-lib: read/create/update/delete /Highlight /Square /Text
+│           ├── pdfText.ts             # extractRegionText() + getPageGeometry() (pdf.js viewport)
+│           ├── qaService.ts           # retrieval (paragraph cosine / BM25) + answer():
+│           │                          #   full / window / region modes, JSON contract + 1 retry
+│           ├── paperCache.ts          # IndexedDB: processed papers, chat sessions, original bytes
+│           ├── llmService.ts          # OpenAI-compatible chat; drops rejected params & retries
+│           ├── embeddingService.ts    # OpenAI-compatible embeddings (batched)
+│           ├── settingsService.ts     # localStorage settings
+│           └── metadataService.ts     # DOI/arXiv lookup — currently unwired (kept for reuse)
+├── .github/workflows/
+│   ├── desktop.yml                    # electron-builder on win/mac/linux → artifacts + Release
+│   ├── docker.yml                     # build Dockerfile.prod → push ghcr.io/<repo>
+│   └── pages.yml                      # deploy frontend/dist to GitHub Pages (needs Pages enabled)
+└── docker-compose.yml                # dev: Vite dev server on :5173
 ```
+
+`*` `api.fetchMetadata` / `metadataService.ts` are dead code paths — the paper-info
+edit UI they fed was removed. Left in tree, not imported by any component.
 
 ## Running
 
+**Web (dev):**
 ```bash
-docker compose up --build
-# → http://localhost:5173
+docker compose up --build          # → http://localhost:5173
+# or: cd frontend && npm install && npm run dev
 ```
 
-On first load the app asks you to pick a local folder — all data is stored there as JSON files and binaries. The folder persists across sessions via IndexedDB (no re-picking needed).
+**Desktop (dev):** `cd frontend && npm run electron:dev` (Vite + Electron together)
 
-## Storage Layout
+**Desktop (package):** `cd frontend && npm run electron:dist` → installers in `frontend/release/`
+(`electron:pack` for an unpacked dir). CI (`desktop.yml`) does this for all three OSes.
 
-All files live inside the user-picked folder:
+**Web (prod static):** `docker build -f frontend/Dockerfile.prod ./frontend`, or pull
+`ghcr.io/vhrique/paper_explorer:latest` (published by `docker.yml`).
 
-```
-<workspace>/
-├── workspace.json                          # projects, tags, passage links
-├── settings.json                           # embedding/LLM API config
-├── papers/
-│   └── {id}/
-│       ├── metadata.json                   # title, filename, DOI, arxiv_id, project_ids
-│       ├── {filename}.pdf                  # original PDF
-│       ├── chunks_meta.json                # chunk text, page, granularity, parent_idx, rects[]
-│       ├── embeddings.bin                  # Float32Array: chunk embeddings (flat, row-major)
-│       └── annotations.json               # passages (highlights) + notes
-└── models/
-    └── project_{id}/
-        └── similarity_projection.json      # learned query/key projection weights
-```
+Browser support: **Chromium only** (Chrome/Edge) — the app relies on the File System
+Access API (`showOpenFilePicker`, `createWritable`). Needs a secure context (HTTPS or
+localhost).
+
+## Storage
+
+There is no workspace folder any more. Data lives in three places, all per-browser:
+
+| Where | What |
+|---|---|
+| **The PDF file itself** | The source of truth for annotations. `pdf-lib` writes `/Highlight`, `/Square`, `/Text` objects into the file (identified by `/NM`); parsed back on load. Debounced atomic write-back via the file handle's `createWritable()` (or `fs.writeFile` in Electron). |
+| **IndexedDB** `paper-explorer-reader` | `papers` — processed chunks + embeddings, keyed by PDF content hash (SHA-256). `chats` — chat sessions per paper. `originals` — one pristine copy of each opened PDF's bytes for recovery. |
+| **localStorage** `paper-explorer-settings` | LLM + embedding Base URL / key / model, context-window tokens, require-sources flag. |
+
+Opening the same PDF again is instant (cache hit by hash). The ⟳ button in the reader
+re-runs processing; clearing the `paper-explorer-reader` IndexedDB database forces a
+full reprocess.
 
 ## Key Concepts
 
-### PDF Processing (`pdfProcessor.ts`)
-Uses pdfjs-dist to parse PDFs client-side. Trusts the PDF content-stream order (reading order for LaTeX-generated papers) to build blocks without explicit column detection:
-- y goes backward → column/section boundary → new block
-- y gap > 1.2× line height → paragraph break → new block
-- Otherwise → new line within the same block
+### PDF processing & paragraph chunking (`pdfProcessor.ts`)
+pdfjs-dist parses the PDF client-side, trusting content-stream order (reading order for
+LaTeX papers — no column detection). Per page it computes **page-level typography
+stats** (median line advance, median line height) and:
+- new **block** when y jumps backward (column) or the gap is > ~2.2× the page median advance
+- inside a block, `makeBlock` inserts a paragraph break (`\n\n`) when the gap is
+  > 1.4× median, or a line has a genuine first-line indent (indented while the *next*
+  line returns to the margin — so hanging-indent bullet lists don't shatter)
 
-Each block is split into paragraphs (blank-line splits) and sentences (punctuation boundaries). Rects are computed per text line (not per bounding box) so highlights never bleed across columns.
+Blocks split into paragraphs (blank-line) and sentences (punctuation). Rects are
+per text line (never per bounding box) so highlights don't bleed across columns.
+`embedChunkTexts()` is separate so embedding can run in the background after the reader
+opens (progress shown next to the ⟳ icon).
 
-### Embeddings
-Sent to an OpenAI-compatible endpoint configured in Settings (LM Studio, Ollama, OpenAI, etc.). Embeddings are optional — BM25 (via MiniSearch) is used as fallback for papers without embeddings.
+### Native PDF annotations (`pdfAnnotations.ts`)
+Highlights → `/Highlight` (QuadPoints), region boxes → `/Square`, sticky notes →
+`/Text`. Geometry goes through pdf.js's viewport transform (`getPageGeometry` in
+`pdfText.ts`) so page rotation and MediaBox offsets are handled. `renderAnnotationLayer`
+is off; `PDFPanel` draws its own `%`-positioned overlay from the parsed annotations, so
+they look identical in-app and in external readers.
 
-### Similarity Search (`similarity.ts`)
-For each query (a user highlight or a search string):
-1. Dense path: cosine similarity in the learned projected space (if embeddings available)
-2. BM25 fallback: for papers using a different or absent embedding model
-3. Resolution: if both a sentence and its parent paragraph rank, the sentence wins
+### Q&A (`qaService.ts` + `ChatPanel.tsx`)
+No RAG on the answer path. The paper's paragraphs are sent to the LLM as a numbered
+JSON array `[{id, page, text}]`; the model must reply with
+`{"answer": string, "sources": number[]}` (≤5 ids, `response_format: json_object`,
+one automatic retry if it doesn't comply). Cited ids resolve to passages → clickable
+"jump to location" cards that scroll + flash the paragraph in the PDF.
 
-### Learned Projection (`similarityModel.ts`)
-Two linear projections (query, key) initialized as identity and trained with TF.js in the browser. Positive pairs:
-- Manual passage links (bidirectional)
-- Note → annotated passage pairs (the note content and its passage are pulled together)
-- Passages co-annotated by the same note
+Three modes, chosen automatically:
+- **full** — the whole paper fits the configured context window
+- **window** — paper too big; fill the budget with the most relevant paragraphs
+  (embedding cosine, else BM25), re-sorted into reading order
+- **region** — a text selection / drawn region is attached; send only a slice of
+  passages centred on the ones it overlaps, and tell the model to answer about that
+  selection specifically
 
-Training triggers automatically after linking or deleting passages; can also be triggered manually.
+`SettingsPanel` exposes the context window (tokens) and a "require the model to cite
+its sources" toggle (off → `{answer}` only, faster/looser for small local models).
+`llmService.chat()` drops request params a model rejects (`temperature`,
+`response_format`) and retries — so GPT-5 / o-series models work unchanged.
 
-### Q&A
-User types a question → top-k paragraph chunks retrieved by cosine similarity → prompt sent to the LLM API → answer displayed in the Search tab.
+### Multi-chat
+Several chats per paper, cycled/switched/deleted from the bar at the top of the Chat
+panel, persisted in the IndexedDB `chats` store keyed by paper hash. Chat title is
+derived from the first question.
+
+### Desktop (`electron/`)
+`main.cjs`: no application menu (`Menu.setApplicationMenu(null)`), a `webRequest`
+handler that adds `Access-Control-Allow-Origin: *` so any endpoint works without CORS
+friction, single-instance lock, and "Open with… Paper Reader" — the PDF path arrives
+via `process.argv` (Windows/Linux) or the `open-file` event (macOS), is buffered until
+the renderer signals ready, then delivered over IPC. `electronFile.ts` turns that path
+into the same `WritableFileHandle` the file picker returns, so annotation write-back is
+identical. `electron-builder.yml` registers `.pdf` as an *option* in the OS "Open with"
+menu — it never forces the default.
 
 ## Common Tasks
 
-### Adding a new stored field
-1. Add the field to the relevant interface in `storage/types.ts`
-2. Update the hydrate function in `storage/workspace.ts`
-3. Update any create/update functions to persist the new field
+### Add a field to the processed-paper cache
+1. Add it to `PaperCacheEntry` in `services/paperCache.ts`
+2. Populate it in `toEntry()` in `App.tsx` (and `ProcessResponse` / `ChunkMetaItem` in
+   `api/index.ts` if it comes from processing)
+3. Bump `DB_VERSION` in `paperCache.ts` only if you need a new object store
 
-### Changing the Embedding or LLM provider
-Open Settings in the app (⚙ icon). Set the Base URL, API Key, and Model name. Settings are saved to `settings.json` in the workspace folder.
+### Change the LLM / embedding provider
+Settings (⚙) → Base URL, API Key, Model. Saved to localStorage. "Test connection"
+mirrors the real request (incl. the param-drop fallback).
 
-### Re-processing a paper's chunks
-Delete and re-upload the paper, or add a dev-mode reprocess button — the PDF is stored at `papers/{id}/{filename}.pdf` and can be re-fed through `processPaperClientSide`.
+### Reprocess a paper
+The ⟳ button in the reader (re-chunk + re-embed with current settings, embedding in the
+background), or clear the `paper-explorer-reader` IndexedDB database and reopen.
+
+### Tune paragraph detection
+`extractPageBlocks` / `makeBlock` thresholds in `pdfProcessor.ts`. There's a standalone
+node script pattern for testing chunking against a real PDF (see git history around the
+pivot).
+
+### Adjust the Q&A prompt / output contract
+`qaService.ts` — `SYSTEM_JSON` / `SYSTEM_ANSWER_ONLY`, `parseAnswerJson`, and the
+mode-selection logic in `answer()`.
