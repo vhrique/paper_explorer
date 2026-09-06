@@ -26,10 +26,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # No per-commit `:sha` tag — that accumulated a new image version on
+          # every push and ate into the (separate, also 500MB-on-Free) Packages
+          # storage quota. `:latest` is overwritten each time; version tags stay.
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=tag
-            type=sha,format=short
 
       - uses: docker/build-push-action@v6
         with:
@@ -38,3 +40,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+        env:
+          # Don't upload the tiny build-record artifact — one less thing eating
+          # Actions artifact storage.
+          DOCKER_BUILD_RECORD_UPLOAD: false
